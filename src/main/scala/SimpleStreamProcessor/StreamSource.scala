@@ -3,7 +3,6 @@ package SimpleStreamProcessor
 import SimpleLazyListProcessor.Node
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.Random
 
 abstract class StreamSource[I] {
   protected var downstream: Option[Node[I, _]] = None
@@ -38,9 +37,9 @@ class FiniteStreamSource[I](data: List[I]) extends StreamSource[I] {
   }
 }
 
-class IntegerSource extends StreamSource[Int] {
-  override protected def produce(): Option[Int] = Some(Random.nextInt(100))
-}
+//class IntegerSource extends StreamSource[Int] {
+//  override protected def produce(): Option[Int] = Some(Random.nextInt(100))
+//}
 
 class FiniteIntegerSource(data: List[Int]) extends FiniteStreamSource[Int](data)
 
@@ -55,5 +54,43 @@ class StreamPartition[I](data: List[I]) extends StreamSource[I] {
     } else {
       None
     }
+  }
+}
+
+import scala.collection.mutable
+
+trait StreamListener[T] {
+  def onData(data: T): Future[Unit]
+}
+
+class DataStream[T](implicit val ec: ExecutionContext) extends StreamSource[T] {
+  private val dataQueue: mutable.Queue[T] = mutable.Queue.empty
+  private val listeners: mutable.ListBuffer[StreamListener[T]] = mutable.ListBuffer.empty
+
+  override def connectTo[O](node: Node[T, O]): Node[T, O] = {
+    val listener = new StreamListener[T] {
+      override def onData(data: T): Future[Unit] = Future {
+        node.processElement(data)
+      }
+    }
+    listeners += listener
+    node
+  }
+
+  def start(): Future[Unit] = Future {
+    while (dataQueue.nonEmpty) {
+      val data = dataQueue.dequeue()
+      listeners.foreach(_.onData(data))
+    }
+  }
+
+  def addData(data: T): Unit = {
+    dataQueue.enqueue(data)
+  }
+
+  // Override the produce method
+  override protected def produce(): Option[T] = {
+    if (dataQueue.nonEmpty) Some(dataQueue.dequeue())
+    else None
   }
 }

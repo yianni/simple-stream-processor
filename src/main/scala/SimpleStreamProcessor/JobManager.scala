@@ -12,8 +12,7 @@ class JobManager(numTaskManagers: Int, numSlotsPerTaskManager: Int)(implicit ec:
       taskManager.runJob(source, node)
     }
 
-    // finally, start all task managers
+    // Finally, start all task managers
     Future.sequence(taskManagers.map(_.start())).map(_ => ())
-//    Future.successful(())
   }
 }
