@@ -1,15 +1,24 @@
 package SimpleStreamProcessor
 
-import java.util.concurrent.Executors
+import SimpleLazyListProcessor.Node
+
 import scala.concurrent.{ExecutionContext, Future}
 
-class JobManager(numberOfTaskManagers: Int, slotsPerTaskManager: Int) {
-  private val executorServices = IndexedSeq.fill(numberOfTaskManagers)(Executors.newFixedThreadPool(slotsPerTaskManager))
-  private val taskManagers: IndexedSeq[TaskManager] = executorServices.map(es => new TaskManager(slotsPerTaskManager)(ExecutionContext.fromExecutorService(es)))
+class JobManager(numTaskManagers: Int, numSlotsPerTaskManager: Int)(implicit ec: ExecutionContext) {
+  private val taskManagers = (1 to numTaskManagers).map(_ => new TaskManager(numSlotsPerTaskManager))
 
-  private def leastLoadedTaskManager: TaskManager = taskManagers.minBy(_.getAvailableSlots)
+  def runJob[I, O](source: StreamSource[I], node: Node[I, O], input: List[I])(implicit ec: ExecutionContext): Future[Unit] = {
+    // divide the input data into partitions
+    val partitions = input.grouped(input.size / numTaskManagers).toList
 
-  def submit[A](job: () => A): Future[A] = leastLoadedTaskManager.submit(job)
+    // for each partition, assign it to a task manager
+    partitions.zip(taskManagers).foreach { case (partition, taskManager) =>
+      val newSource = source.copy(partition)
+      newSource.connectTo(node)
+      taskManager.runJob(newSource, node)
+    }
 
-  def shutdown(): Unit = executorServices.foreach(_.shutdown())
+    // finally, start all task managers
+    Future.sequence(taskManagers.map(_.start())).map(_ => ())
+  }
 }

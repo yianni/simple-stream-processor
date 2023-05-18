@@ -1,28 +1,26 @@
 package SimpleStreamProcessor
 
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import SimpleLazyListProcessor.Node
 
-class TaskManager(totalSlots: Int)(implicit executionContext: ExecutionContext) {
-  private var availableSlots: Int = totalSlots
+import scala.concurrent.{ExecutionContext, Future}
 
-  def submit[A](job: () => A): Future[A] = synchronized {
-    if (availableSlots <= 0) throw new Exception("No available slots in the Task Manager")
-    availableSlots -= 1
-    val promise = Promise[A]()
-    executionContext.execute(() => {
-      try {
-        promise.success(job())
-      } catch {
-        case e: Throwable => promise.failure(e)
-      } finally {
-        availableSlots += 1
-      }
-    })
-    promise.future
+class TaskManager(numSlots: Int)(implicit ec: ExecutionContext) {
+  private var tasks: List[Future[Unit]] = Nil
+
+  def runJob[I, O](source: StreamSource[I], node: Node[I, O]): Future[Unit] = {
+    source.connectTo(node)
+    val task = source.start()
+    tasks = task :: tasks
+    task
   }
 
-  def getAvailableSlots: Int = synchronized {
-    availableSlots
+  def start(): Future[List[Unit]] = {
+    // start all tasks
+    Future.sequence(tasks)
   }
 
+  def stop(): Future[List[Unit]] = {
+    // wait for all tasks to complete
+    Future.sequence(tasks)
+  }
 }
