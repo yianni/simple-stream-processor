@@ -3,8 +3,9 @@ package SimpleStreamProcessor
 import SimpleLazyListProcessor.Node
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.Random
 
-abstract class StreamSource[I](protected var data: List[I]) {
+abstract class StreamSource[I] {
   protected var downstream: Option[Node[I, _]] = None
 
   def connectTo[O](node: Node[I, O]): Node[I, O] = {
@@ -21,21 +22,38 @@ abstract class StreamSource[I](protected var data: List[I]) {
     }
   }
 
-  //  protected def produce(): Option[I]
-
-  protected def produce(): Option[I] = {
-    data match {
-      case Nil => None
-      case head :: tail =>
-        data = tail
-        Some(head)
-    }
-  }
-
-  def copy(newData: List[I]): StreamSource[I]
-
+  protected def produce(): Option[I]
 }
 
-class IntegerSource(data: List[Int]) extends StreamSource[Int](data) {
-  override def copy(newData: List[Int]): StreamSource[Int] = new IntegerSource(newData)
+class FiniteStreamSource[I](data: List[I]) extends StreamSource[I] {
+  private val iterator = data.iterator
+
+  override def produce(): Option[I] = {
+    if (iterator.hasNext) Some(iterator.next())
+    else None
+  }
+
+  def copy(data: List[I]): FiniteStreamSource[I] = {
+    new FiniteStreamSource(data)
+  }
+}
+
+class IntegerSource extends StreamSource[Int] {
+  override protected def produce(): Option[Int] = Some(Random.nextInt(100))
+}
+
+class FiniteIntegerSource(data: List[Int]) extends FiniteStreamSource[Int](data)
+
+class StreamPartition[I](data: List[I]) extends StreamSource[I] {
+  private var index = 0
+
+  override protected def produce(): Option[I] = {
+    if (index < data.length) {
+      val element = data(index)
+      index += 1
+      Some(element)
+    } else {
+      None
+    }
+  }
 }
