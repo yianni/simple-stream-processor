@@ -29,4 +29,3 @@ class MultiplyByTwoNode extends Node[Int, Int] {
 class PrintNode extends Node[Int, Unit] {
   override protected def run(input: List[Int]): List[Unit] = input.map(println)
 }
-

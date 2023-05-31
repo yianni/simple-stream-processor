@@ -2,44 +2,61 @@ package SimpleStreamProcessor
 
 import SimpleLazyListProcessor.{MultiplyByTwoNode, PrintNode}
 
-import scala.concurrent.Await
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration.DurationInt
+import scala.concurrent.ExecutionContext
 
 object Main {
   def main(args: Array[String]): Unit = {
-//    val jobManager = new JobManager(1, 1)
-//    val source = new IntegerSource
-//    val multiplyNode = new MultiplyByTwoNode
-//    val printNode = new PrintNode
-//
-//    // Connect nodes and run the job
-//    source.connectTo(multiplyNode).connectTo(printNode)
-//    val future = jobManager.runJob(source, multiplyNode)
-//
-//    // This will cause the main method to wait for the Future to complete. Adjust the duration as needed.
-//    Await.result(future, 44.seconds)
+    val dataStreamEC = ExecutionContext.fromExecutor(java.util.concurrent.Executors.newFixedThreadPool(4))
+    val jobManagerEC = ExecutionContext.fromExecutor(java.util.concurrent.Executors.newFixedThreadPool(4))
+    val fooEc = ExecutionContext.fromExecutor(java.util.concurrent.Executors.newFixedThreadPool(4))
 
 
-    val dataStream = new DataStream[Int]
-
+    val jobManager = new JobManager(1, 1)(jobManagerEC)
+    val dataStream = new DataStream[Int]()(dataStreamEC)
     val multiplyNode = new MultiplyByTwoNode
     val printNode = new PrintNode
 
+    // Connect nodes
     dataStream.connectTo(multiplyNode).connectTo(printNode)
 
-    (1 to 100).foreach(dataStream.addData)
+    // Start the stream
+    dataStream.start()(dataStreamEC)
 
-    val jobManager = new JobManager(1, 1)
-    val streamStart = dataStream.start()
+    // Add initial data
 
+    def infiniteList(start: Int): LazyList[Int] = {
+      start #:: infiniteList(start + 1)
+    }
+
+//    val myList = infiniteList(1).foreach{ i => 
+    for (i <- 1 to 10) {
+      dataStream.addData(i)
+
+//            dataStream.addData(Random.nextInt(100))
+    }
+
+    dataStream.signalEndOfStream()
+
+    // Run the job
     val future = jobManager.runJob(dataStream, multiplyNode)
 
-    // We call start on dataStream to process the data
+    // After a delay, add more data
+    //    Future {
+    //      Thread.sleep(1000) // simulate delay
+    //      for (i <- 1 to 10) {
+    //        dataStream.addData(Random.nextInt(100))
+    //      }
+    //      dataStream.signalEndOfStream()
+    //    }
 
-    // This will cause the main method to wait for the Future to complete. 
-    Await.result(future, 60.seconds)
-    Await.result(streamStart, 60.seconds)
-    
+    //        val allFutures = Future.sequence(Seq(future, streamStart))
+
+    // This will cause the main method to wait for both Futures to complete.
+    future.onComplete {
+      case scala.util.Success(_) => println("Successful")
+      case scala.util.Failure(e) => println(s"Failure: ${e.getMessage}")
+    }(fooEc)
+
+
   }
 }
