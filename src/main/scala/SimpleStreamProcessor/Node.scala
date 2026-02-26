@@ -1,5 +1,8 @@
 package SimpleStreamProcessor
 
+import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueValue}
+
+import java.util.concurrent.ArrayBlockingQueue
 import scala.concurrent.ExecutionContext
 
 sealed trait Node[I, O] {
@@ -17,6 +20,8 @@ sealed trait Node[I, O] {
 
   def parMap[O2](parallelism: Int)(f: O => O2)(implicit executionContext: ExecutionContext): Node[I, O2] =
     ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
+
+  def asyncBoundary(bufferSize: Int): Node[I, O] = AsyncBoundaryPipe(this, bufferSize).withName(this.nodeName + ".asyncBoundary")
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
   def withName(name: String): this.type = {
@@ -64,6 +69,31 @@ case class ParMapPipe[I, O, O2](
   executionContext: ExecutionContext
 ) extends Node[I, O2] {
   def run(input: Stream[I]): Stream[O2] = upstream.run(input).parMap(parallelism)(f)(executionContext)
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extends Node[I, O] {
+  def run(input: Stream[I]): Stream[O] = {
+    if (bufferSize <= 0) return Stream.Error(new IllegalArgumentException("bufferSize must be > 0"))
+
+    val queue = new ArrayBlockingQueue[QueueSignal[O]](bufferSize)
+
+    val producer = new Thread(() => {
+      try {
+        upstream.run(input).foreach(o => queue.put(QueueValue(o)))
+        queue.put(QueueEnd)
+      } catch {
+        case e: Throwable => queue.put(QueueError(e))
+      }
+    })
+
+    producer.setName(s"simple-stream-async-boundary-$nodeName")
+    producer.setDaemon(true)
+    producer.start()
+
+    Stream.fromBlockingQueue(queue)
+  }
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
