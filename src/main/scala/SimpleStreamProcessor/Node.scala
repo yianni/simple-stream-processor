@@ -87,6 +87,33 @@ sealed trait Node[I, O] {
       loop(run(input))
     }
 
+  def runCancellableIterator(input: Stream[I], bufferSize: Int = 64)(implicit executionContext: ExecutionContext): CancellableIterator[O] = {
+    val capacity = math.max(1, bufferSize)
+    val queue = new ArrayBlockingQueue[QueueSignal[O]](capacity)
+
+    val handle = runForeachAsync(input) { value =>
+      queue.put(QueueValue(value))
+    }
+
+    def publishTerminal(signal: QueueSignal[O]): Unit = {
+      queue.clear()
+      queue.offer(signal)
+    }
+
+    handle.outcome.foreach {
+      case ExecutionCompleted(_) => publishTerminal(QueueEnd)
+      case ExecutionCancelled => publishTerminal(QueueEnd)
+      case ExecutionFailed(error) => publishTerminal(QueueError(error))
+    }(executionContext)
+
+    CancellableIterator(
+      iterator = Stream.fromBlockingQueue(queue).iterator,
+      cancel = handle.cancel,
+      outcome = handle.outcome,
+      metricsSnapshot = handle.metricsSnapshot
+    )
+  }
+
   def runIterator(input: Stream[I]): Iterator[O] = run(input).iterator
 
   def withName(name: String): this.type = {
@@ -188,6 +215,7 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
     val queue = new ArrayBlockingQueue[QueueSignal[O]](bufferSize)
     val cancellationToken = RuntimeControl.currentToken
+    val collector = Metrics.currentCollector
     val lastConsumerSignalNs = new AtomicLong(System.nanoTime())
     val stalledConsumerNs = TimeUnit.SECONDS.toNanos(2)
 
@@ -210,24 +238,26 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
     }
 
     val producer = new Thread(() => {
-      cancellationToken.foreach(_.registerCurrentThread())
-      try {
-        upstream.run(input).foreach { o =>
-          putOrAbort(QueueValue(o))
+      Metrics.withCollector(collector) {
+        cancellationToken.foreach(_.registerCurrentThread())
+        try {
+          upstream.run(input).foreach { o =>
+            putOrAbort(QueueValue(o))
+          }
+          putOrAbort(QueueEnd)
+        } catch {
+          case _: InterruptedException if cancellationToken.exists(_.isCancelled) =>
+            queue.offer(QueueEnd)
+            Metrics.setBoundaryQueueDepth(queue.size())
+          case _: CancellationException =>
+            queue.offer(QueueEnd)
+            Metrics.setBoundaryQueueDepth(queue.size())
+          case e: Throwable =>
+            queue.offer(QueueError(e))
+            Metrics.setBoundaryQueueDepth(queue.size())
+        } finally {
+          cancellationToken.foreach(_.unregisterCurrentThread())
         }
-        putOrAbort(QueueEnd)
-      } catch {
-        case _: InterruptedException if cancellationToken.exists(_.isCancelled) =>
-          queue.offer(QueueEnd)
-          Metrics.setBoundaryQueueDepth(queue.size())
-        case _: CancellationException =>
-          queue.offer(QueueEnd)
-          Metrics.setBoundaryQueueDepth(queue.size())
-        case e: Throwable =>
-          queue.offer(QueueError(e))
-          Metrics.setBoundaryQueueDepth(queue.size())
-      } finally {
-        cancellationToken.foreach(_.unregisterCurrentThread())
       }
     })
 

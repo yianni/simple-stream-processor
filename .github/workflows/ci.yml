@@ -26,5 +26,5 @@ jobs:
       - name: Run unit tests
         run: sbt -Dsbt.supershell=false test
 
-      - name: Run backpressure stress smoke
-        run: sbt -Dsbt.supershell=false "Test / runMain SimpleStreamProcessor.BackpressureStressValidation 5000"
+      - name: Run backpressure stress assertions
+        run: sbt -Dsbt.supershell=false "Test / runMain SimpleStreamProcessor.BackpressureStressValidation 10000"

@@ -115,6 +115,7 @@ sealed trait Stream[+A] {
 
     def runBatch(batch: List[A]): List[B] = {
       val cancellationToken = RuntimeControl.currentToken
+      val collector = Metrics.currentCollector
       val executor = Executors.newFixedThreadPool(parallelism)
       val completion = new ExecutorCompletionService[(Int, Either[Throwable, B])](executor)
       val results = Array.fill[Option[B]](batch.size)(None)
@@ -127,13 +128,13 @@ sealed trait Stream[+A] {
                 if (cancellationToken.exists(_.isCancelled)) {
                   (index, Left(new java.util.concurrent.CancellationException("Pipeline cancelled")))
                 } else {
-                  Metrics.incParMapInFlight()
+                  collector.incParMapInFlight()
                   try {
                     (index, Right(f(value)))
                   } catch {
                     case e: Throwable => (index, Left(e))
                   } finally {
-                    Metrics.decParMapInFlight()
+                    collector.decParMapInFlight()
                   }
                 }
               }
