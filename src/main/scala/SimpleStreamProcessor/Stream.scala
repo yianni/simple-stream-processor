@@ -59,7 +59,9 @@ sealed trait Stream[+A] {
       case Emit(a, next) => go(next(), f(acc, a))
       case Halt() => acc
       case Empty => acc
-      case Error(e) => throw e
+      case Error(e) =>
+        Metrics.incUnhandledError()
+        throw e
     }
 
     go(this, z)
@@ -71,14 +73,18 @@ sealed trait Stream[+A] {
       next().foreach(f)
     case Halt() =>
     case Empty =>
-    case Error(e) => throw e
+    case Error(e) =>
+      Metrics.incUnhandledError()
+      throw e
   }
 
   final def toList: List[A] = this match {
     case Emit(a, next) => a :: next().toList
     case Halt() => Nil
     case Empty => Nil
-    case Error(e) => throw e
+    case Error(e) =>
+      Metrics.incUnhandledError()
+      throw e
   }
 
   def recover[B >: A](f: PartialFunction[Throwable, B]): Stream[B] =
@@ -97,16 +103,40 @@ sealed trait Stream[+A] {
   def parMap[B](parallelism: Int)(f: A => B)(implicit executionContext: ExecutionContext): Stream[B] = {
     if (parallelism <= 0) return Error(new IllegalArgumentException("parallelism must be > 0"))
 
-    try {
-      val out = toList
-        .grouped(parallelism)
-        .flatMap { batch =>
-          val batchFutures = batch.map(a => Future(f(a)))
-          Await.result(Future.sequence(batchFutures), Duration.Inf)
-        }
-        .toList
+    def takeBatch(s: Stream[A], remaining: Int, acc: List[A]): (List[A], Stream[A]) = {
+      if (remaining <= 0) (acc.reverse, s)
+      else s match {
+        case Emit(a, next) => takeBatch(next(), remaining - 1, a :: acc)
+        case Halt() => (acc.reverse, Halt())
+        case Empty => (acc.reverse, Empty)
+        case Error(e) => throw e
+      }
+    }
 
-      Stream.fromList(out)
+    def runBatch(batch: List[A]): List[B] = {
+      val batchFutures = batch.map { a =>
+        Metrics.incParMapInFlight()
+        Future(f(a)).andThen { case _ => Metrics.decParMapInFlight() }
+      }
+      Await.result(Future.sequence(batchFutures), Duration.Inf)
+    }
+
+    def loop(s: Stream[A]): Stream[B] = s match {
+      case Halt() => Halt()
+      case Empty => Empty
+      case Error(e) => Error(e)
+      case _ =>
+        try {
+          val (batch, rest) = takeBatch(s, parallelism, Nil)
+          if (batch.isEmpty) Halt()
+          else Stream.fromList(runBatch(batch)).append(loop(rest))
+        } catch {
+          case e: Throwable => Error(e)
+        }
+    }
+
+    try {
+      loop(this)
     } catch {
       case e: Throwable => Error(e)
     }
@@ -171,6 +201,52 @@ sealed trait Stream[+A] {
     }
   }
 
+  def takeUntilCancelled(token: CancellationToken): Stream[A] = {
+    if (token.isCancelled) Halt()
+    else this match {
+      case Emit(a, next) => Emit(a, () => next().takeUntilCancelled(token))
+      case Halt() => Halt()
+      case Empty => Empty
+      case Error(e) => Error(e)
+    }
+  }
+
+  def iterator: Iterator[A] = new Iterator[A] {
+    private var current: Stream[A] = Stream.this
+    private var nextValue: Option[A] = None
+    private var done = false
+
+    private def advance(): Unit = {
+      if (done || nextValue.nonEmpty) return
+      current match {
+        case Emit(a, next) =>
+          nextValue = Some(a)
+          current = next()
+        case Halt() => done = true
+        case Empty => done = true
+        case Error(e) =>
+          done = true
+          Metrics.incUnhandledError()
+          throw e
+      }
+    }
+
+    override def hasNext: Boolean = {
+      advance()
+      nextValue.nonEmpty
+    }
+
+    override def next(): A = {
+      advance()
+      nextValue match {
+        case Some(value) =>
+          nextValue = None
+          value
+        case None => throw new NoSuchElementException("next on empty iterator")
+      }
+    }
+  }
+
 }
 
 object Stream {
@@ -186,6 +262,7 @@ object Stream {
   case class QueueValue[A](value: A) extends QueueSignal[A]
   case object QueueEnd extends QueueSignal[Nothing]
   case class QueueError(e: Throwable) extends QueueSignal[Nothing]
+
   def fromList[A](list: List[A]): Stream[A] = list match {
     case Nil => Empty
     case h :: t => Emit(h, () => fromList(t))
@@ -199,12 +276,19 @@ object Stream {
   def fromBlockingQueue[A](queue: BlockingQueue[QueueSignal[A]]): Stream[A] = {
     try {
       queue.take() match {
-        case QueueValue(value) => Emit(value, () => fromBlockingQueue(queue))
-        case QueueEnd => Halt()
-        case QueueError(e) => Error(e)
+        case QueueValue(value) =>
+          Metrics.setBoundaryQueueDepth(queue.size())
+          Emit(value, () => fromBlockingQueue(queue))
+        case QueueEnd =>
+          Metrics.setBoundaryQueueDepth(queue.size())
+          Halt()
+        case QueueError(e) =>
+          Metrics.setBoundaryQueueDepth(queue.size())
+          Error(e)
       }
     } catch {
       case e: Throwable => Error(e)
     }
   }
+
 }

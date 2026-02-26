@@ -2,9 +2,11 @@ package SimpleStreamProcessor
 
 import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueValue}
 
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ArrayBlockingQueue
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
+import scala.annotation.tailrec
 
 sealed trait Node[I, O] {
   protected var nodeName: String = "Node"
@@ -25,10 +27,61 @@ sealed trait Node[I, O] {
   def asyncBoundary(bufferSize: Int): Node[I, O] = AsyncBoundaryPipe(this, bufferSize).withName(this.nodeName + ".asyncBoundary")
 
   def windowByCount(size: Int): Node[I, List[O]] = CountWindowPipe(this, size).withName(this.nodeName + ".windowByCount")
+
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
   def toManagedSink[R <: AutoCloseable](resourceFactory: () => R)(consume: (R, O) => Unit): ManagedSink[I, O, R] =
     ManagedSink(this, resourceFactory, consume).withName(this.nodeName + ".toManagedSink")
+
+  def runToListAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[List[O]] =
+    RuntimeControl.runAsync { token =>
+      def finalizeOnCancel(stream: Stream[O]): Unit = {
+        stream.takeUntilCancelled(token).foreach(_ => ())
+      }
+
+      @tailrec
+      def loop(stream: Stream[O], acc: List[O]): List[O] = {
+        if (token.isCancelled) {
+          finalizeOnCancel(stream)
+          throw new CancellationException("Pipeline cancelled")
+        }
+        stream match {
+          case Stream.Emit(value, next) => loop(next(), value :: acc)
+          case Stream.Halt() => acc.reverse
+          case Stream.Empty => acc.reverse
+          case Stream.Error(e) => throw e
+        }
+      }
+
+      loop(run(input), Nil)
+    }
+
+  def runForeachAsync(input: Stream[I])(consume: O => Unit)(implicit executionContext: ExecutionContext): ExecutionHandle[Unit] =
+    RuntimeControl.runAsync { token =>
+      def finalizeOnCancel(stream: Stream[O]): Unit = {
+        stream.takeUntilCancelled(token).foreach(_ => ())
+      }
+
+      @tailrec
+      def loop(stream: Stream[O]): Unit = {
+        if (token.isCancelled) {
+          finalizeOnCancel(stream)
+          throw new CancellationException("Pipeline cancelled")
+        }
+        stream match {
+          case Stream.Emit(value, next) =>
+            consume(value)
+            loop(next())
+          case Stream.Halt() =>
+          case Stream.Empty =>
+          case Stream.Error(e) => throw e
+        }
+      }
+
+      loop(run(input))
+    }
+
+  def runIterator(input: Stream[I]): Iterator[O] = run(input).iterator
 
   def withName(name: String): this.type = {
     nodeName = name;
@@ -48,12 +101,19 @@ case class ManagedSource[I, R <: AutoCloseable](resourceFactory: () => R, stream
   def run(input: Stream[Unit]): Stream[I] = {
     val resource = resourceFactory()
     try {
-      streamFactory(resource).ensuring(() => resource.close())
+      val stream = streamFactory(resource)
+      val cancellableStream = RuntimeControl.currentToken match {
+        case Some(token) => stream.takeUntilCancelled(token)
+        case None => stream
+      }
+      cancellableStream.ensuring(() => resource.close())
     } catch {
       case e: Throwable =>
         try resource.close()
         catch {
-          case closeError: Throwable => e.addSuppressed(closeError)
+          case closeError: Throwable =>
+            Metrics.incResourceCloseFailure()
+            e.addSuppressed(closeError)
         }
         Stream.Error(e)
     }
@@ -102,13 +162,33 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
     if (bufferSize <= 0) return Stream.Error(new IllegalArgumentException("bufferSize must be > 0"))
 
     val queue = new ArrayBlockingQueue[QueueSignal[O]](bufferSize)
+    val cancellationToken = RuntimeControl.currentToken
 
     val producer = new Thread(() => {
+      cancellationToken.foreach(_.registerCurrentThread())
       try {
-        upstream.run(input).foreach(o => queue.put(QueueValue(o)))
+        upstream.run(input).foreach { o =>
+          if (cancellationToken.exists(_.isCancelled)) throw new CancellationException("Pipeline cancelled")
+          val startedAtNs = System.nanoTime()
+          queue.put(QueueValue(o))
+          val blockedMs = (System.nanoTime() - startedAtNs) / 1000000
+          Metrics.addBoundaryProducerBlockedMs(blockedMs)
+          Metrics.setBoundaryQueueDepth(queue.size())
+        }
         queue.put(QueueEnd)
+        Metrics.setBoundaryQueueDepth(queue.size())
       } catch {
-        case e: Throwable => queue.put(QueueError(e))
+        case _: InterruptedException if cancellationToken.exists(_.isCancelled) =>
+          queue.offer(QueueEnd)
+          Metrics.setBoundaryQueueDepth(queue.size())
+        case _: CancellationException =>
+          queue.offer(QueueEnd)
+          Metrics.setBoundaryQueueDepth(queue.size())
+        case e: Throwable =>
+          queue.put(QueueError(e))
+          Metrics.setBoundaryQueueDepth(queue.size())
+      } finally {
+        cancellationToken.foreach(_.unregisterCurrentThread())
       }
     })
 
@@ -121,6 +201,7 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
+
 case class CountWindowPipe[I, O](upstream: Node[I, O], size: Int) extends Node[I, List[O]] {
   def run(input: Stream[I]): Stream[List[O]] = upstream.run(input).grouped(size)
 
@@ -174,6 +255,8 @@ case class EventTimeWindowPipe[I, O](upstream: Node[I, TimedEvent[O]], windowSiz
           if (ts >= currentWatermark) {
             val start = (ts / windowSizeMs) * windowSizeMs
             openWindows.update(start, openWindows.getOrElse(start, Nil) :+ value)
+          } else {
+            Metrics.incLateEventDropped()
           }
 
         case Watermark(wmTs) =>
@@ -187,6 +270,8 @@ case class EventTimeWindowPipe[I, O](upstream: Node[I, TimedEvent[O]], windowSiz
                 val values = openWindows.remove(start).getOrElse(Nil)
                 emitted += EventTimeWindow(start, start + windowSizeMs, values, currentWatermark)
               }
+          } else if (wmTs < currentWatermark) {
+            Metrics.incWatermarkRegression()
           }
       }
 
@@ -232,6 +317,7 @@ case class ManagedSink[I, O, R <: AutoCloseable](
         resource.close()
       } catch {
         case closeError: Throwable =>
+          Metrics.incResourceCloseFailure()
           if (processingError != null) processingError.addSuppressed(closeError)
           else throw closeError
       }
@@ -240,10 +326,70 @@ case class ManagedSink[I, O, R <: AutoCloseable](
 
   def withName(newName: String): ManagedSink[I, O, R] = this.copy(name = newName)
 
+  def runAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[Unit] =
+    RuntimeControl.runAsync { token =>
+      val resource = resourceFactory()
+      var processingError: Throwable = null
+
+      try {
+        @tailrec
+        def drain(stream: Stream[O]): Unit = {
+          if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+          stream match {
+            case Stream.Emit(value, next) =>
+              consume(resource, value)
+              drain(next())
+            case Stream.Halt() =>
+            case Stream.Empty =>
+            case Stream.Error(e) => throw e
+          }
+        }
+
+        drain(upstream.run(input))
+      } catch {
+        case e: Throwable =>
+          processingError = e
+          throw e
+      } finally {
+        try {
+          resource.close()
+        } catch {
+          case closeError: Throwable =>
+            Metrics.incResourceCloseFailure()
+            if (processingError != null) processingError.addSuppressed(closeError)
+            else throw closeError
+        }
+      }
+    }
+
   override def toString: String = s"$name($upstream)"
 }
+
 case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: String = "Sink") {
   def run(input: Stream[I]): O = upstream.run(input).fold(zero)(f)
+
+  def runAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[O] =
+    RuntimeControl.runAsync { token =>
+      def finalizeOnCancel(stream: Stream[O]): Unit = {
+        stream.takeUntilCancelled(token).foreach(_ => ())
+      }
+
+      @tailrec
+      def loop(stream: Stream[O], acc: O): O = {
+        if (token.isCancelled) {
+          finalizeOnCancel(stream)
+          throw new CancellationException("Pipeline cancelled")
+        }
+        stream match {
+          case Stream.Emit(value, next) => loop(next(), f(acc, value))
+          case Stream.Halt() => acc
+          case Stream.Empty => acc
+          case Stream.Error(e) => throw e
+        }
+      }
+
+      loop(upstream.run(input), zero)
+    }
 
   def withName(newName: String): Sink[I, O] = this.copy(name = newName)
 

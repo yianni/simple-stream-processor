@@ -1,11 +1,20 @@
 package SimpleStreamProcessor
 
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.BeforeAndAfterEach
 import SimpleStreamProcessor.NodeSyntax._
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.Await
+import java.util.concurrent.atomic.AtomicInteger
 
-class SimpleStreamProcessorTest extends AnyFunSuite {
+class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
+
+  override protected def beforeEach(): Unit = {
+    super.beforeEach()
+    Metrics.reset()
+  }
 
   test("Source with map and filter operations") {
     val source: Source[Int] = Source[Int](Stream.fromList((1 to 10).toList)).withName("source")
@@ -37,6 +46,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toList
 
     assert(result == List(10, 5, -1))
+    assert(Metrics.snapshot().unhandledErrorTotal == 0)
   }
 
   test("Sink fails when upstream stream contains an error") {
@@ -45,6 +55,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toSink((acc: Int, i: Int) => acc + i, 0)
 
     intercept[ArithmeticException](sink.run(Stream.Empty))
+    assert(Metrics.snapshot().unhandledErrorTotal > 0)
   }
 
   test("Node recover allows pipeline-level fallback") {
@@ -67,6 +78,24 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toList
 
     assert(result == List(10, 20, 30, 40))
+    assert(Metrics.snapshot().parMapInFlight == 0)
+  }
+
+  test("Stream parMap processes work in batches lazily") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val invoked = new AtomicInteger(0)
+
+    val stream = Stream.fromList((1 to 100).toList).parMap(4) { i =>
+      invoked.incrementAndGet()
+      i * 2
+    }
+
+    stream match {
+      case Stream.Emit(_, _) =>
+      case _ => fail("Expected non-empty stream")
+    }
+
+    assert(invoked.get() == 4)
   }
 
   test("Stream parMap fails fast on invalid parallelism") {
@@ -153,6 +182,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
 
     intercept[ArithmeticException](sink.run(Stream.Empty))
     assert(captured.closed)
+    assert(Metrics.snapshot().resourceCloseFailTotal == 0)
   }
 
   test("Managed source closes resource after stream consumption") {
@@ -218,5 +248,176 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toList
 
     assert(windows == List(EventTimeWindow(0L, 5L, List("a"), 8L)))
+    assert(Metrics.snapshot().lateEventDroppedTotal == 1)
+    assert(Metrics.snapshot().watermarkRegressionTotal == 1)
   }
+
+  test("Async boundary queue depth stays within configured capacity") {
+    val capacity = 4
+    val result = Source[Int](Stream.fromList((1 to 300).toList))
+      .asyncBoundary(capacity)
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+      .run(Stream.Empty)
+      .toList
+
+    assert(result.size == 300)
+    assert(Metrics.snapshot().boundaryQueueDepthMax <= capacity)
+    assert(Metrics.snapshot().boundaryProducerBlockedMs >= 0)
+  }
+
+  test("Managed sink close failure is recorded") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3)))
+      .toManagedSink(() => new BrokenResource)((_, _) => ())
+
+    intercept[RuntimeException](sink.run(Stream.Empty))
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
+  test("Sink runAsync returns completed outcome") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3, 4)))
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    val handle = sink.runAsync(Stream.Empty)
+    val outcome = Await.result(handle.outcome, 2.seconds)
+
+    assert(outcome == ExecutionCompleted(10))
+  }
+
+  test("Sink runAsync supports cancellation") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val sink = Source[Int](Stream.fromList((1 to 5000).toList))
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    val handle = sink.runAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+  }
+
+  test("Managed sink runAsync cancellation still closes resource") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    class FakeResource extends AutoCloseable {
+      @volatile var closed = false
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val sink = Source[Int](Stream.fromList((1 to 5000).toList))
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+      .toManagedSink(() => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      })((_, _) => ())
+
+    val handle = sink.runAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+    assert(captured.closed)
+  }
+
+  test("Node runToListAsync returns completed outcome") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val node = Source[Int](Stream.fromList(List(1, 2, 3))).map(_ * 2)
+    val handle = node.runToListAsync(Stream.Empty)
+    val outcome = Await.result(handle.outcome, 2.seconds)
+
+    assert(outcome == ExecutionCompleted(List(2, 4, 6)))
+  }
+
+  test("Managed source runToListAsync cancellation closes resource") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    class FakeResource extends AutoCloseable {
+      @volatile var closed = false
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val source = ManagedSource[Int, FakeResource](
+      resourceFactory = () => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      },
+      streamFactory = _ => Stream.fromList((1 to 5000).toList).map { i =>
+        Thread.sleep(1)
+        i
+      }
+    )
+
+    val handle = source.runToListAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+    assert(captured.closed)
+  }
+
+  test("Node runIterator pulls lazily") {
+    val invoked = new AtomicInteger(0)
+
+    val node = Source[Int](Stream.fromList((1 to 10).toList)).map { i =>
+      invoked.incrementAndGet()
+      i * 2
+    }
+
+    val it = node.runIterator(Stream.Empty)
+    assert(invoked.get() == 1)
+
+    assert(it.next() == 2)
+    assert(invoked.get() == 2)
+
+    assert(it.next() == 4)
+    assert(invoked.get() == 3)
+  }
+
+  test("Node runForeachAsync supports cancellation") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val processed = new AtomicInteger(0)
+
+    val node = Source[Int](Stream.fromList((1 to 2000).toList))
+      .asyncBoundary(8)
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+
+    val handle = node.runForeachAsync(Stream.Empty) { _ =>
+      processed.incrementAndGet()
+    }
+
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+    assert(processed.get() < 2000)
+  }
+
 }
