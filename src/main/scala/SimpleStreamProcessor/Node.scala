@@ -14,6 +14,8 @@ import scala.annotation.tailrec
 sealed trait Node[I, O] {
   protected var nodeName: String = "Node"
 
+  def name: String = nodeName
+
   def run(input: Stream[I]): Stream[O]
 
   def map[O2](f: O => O2): Node[I, O2] = Pipe(this, f).withName(this.nodeName + ".map")

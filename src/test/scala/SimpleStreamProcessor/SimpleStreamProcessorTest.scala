@@ -9,6 +9,7 @@ import scala.concurrent.duration.DurationInt
 import scala.concurrent.Await
 import scala.concurrent.Promise
 import java.util.concurrent.atomic.AtomicInteger
+import java.io.ByteArrayOutputStream
 import scala.jdk.CollectionConverters._
 
 class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
@@ -596,6 +597,32 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     } finally {
       release.trySuccess(())
       jobManager.shutdown()
+    }
+  }
+
+  test("JobGraph printTopology renders readable tree") {
+    val sink = Source[Int](Stream.fromList((1 to 3).toList)).withName("source")
+      .map(_ * 2).withName("pipe1")
+      .filter(_ % 2 == 0).withName("pipe2")
+      .toSink((acc: Int, i: Int) => acc + i, 0).withName("sink")
+
+    val jobGraph = JobGraph[Unit, Int](sink, new JobManager(1, 1))
+    val out = new ByteArrayOutputStream()
+
+    try {
+      Console.withOut(out) {
+        jobGraph.printTopology()
+      }
+
+      val rendered = out.toString.trim.split(System.lineSeparator()).toList
+      assert(rendered == List(
+        "Sink(sink)",
+        "  FilterPipe(pipe2)",
+        "    Pipe(pipe1)",
+        "      Source(source)"
+      ))
+    } finally {
+      jobGraph.jobManager.shutdown()
     }
   }
 
