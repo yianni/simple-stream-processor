@@ -84,5 +84,4 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
 
     assert(sink.run(Stream.Empty) == 20)
   }
-
 }

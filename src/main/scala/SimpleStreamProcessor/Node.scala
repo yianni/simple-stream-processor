@@ -17,7 +17,6 @@ sealed trait Node[I, O] {
 
   def parMap[O2](parallelism: Int)(f: O => O2)(implicit executionContext: ExecutionContext): Node[I, O2] =
     ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
-
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
   def withName(name: String): this.type = {
@@ -68,7 +67,6 @@ case class ParMapPipe[I, O, O2](
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
-
 case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: String = "Sink") {
   def run(input: Stream[I]): O = upstream.run(input).fold(zero)(f)
 
