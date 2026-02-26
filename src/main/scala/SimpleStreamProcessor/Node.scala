@@ -25,7 +25,6 @@ sealed trait Node[I, O] {
   def asyncBoundary(bufferSize: Int): Node[I, O] = AsyncBoundaryPipe(this, bufferSize).withName(this.nodeName + ".asyncBoundary")
 
   def windowByCount(size: Int): Node[I, List[O]] = CountWindowPipe(this, size).withName(this.nodeName + ".windowByCount")
-
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
   def toManagedSink[R <: AutoCloseable](resourceFactory: () => R)(consume: (R, O) => Unit): ManagedSink[I, O, R] =
@@ -122,7 +121,6 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
-
 case class CountWindowPipe[I, O](upstream: Node[I, O], size: Int) extends Node[I, List[O]] {
   def run(input: Stream[I]): Stream[List[O]] = upstream.run(input).grouped(size)
 
@@ -244,7 +242,6 @@ case class ManagedSink[I, O, R <: AutoCloseable](
 
   override def toString: String = s"$name($upstream)"
 }
-
 case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: String = "Sink") {
   def run(input: Stream[I]): O = upstream.run(input).fold(zero)(f)
 

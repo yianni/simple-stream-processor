@@ -186,7 +186,6 @@ object Stream {
   case class QueueValue[A](value: A) extends QueueSignal[A]
   case object QueueEnd extends QueueSignal[Nothing]
   case class QueueError(e: Throwable) extends QueueSignal[Nothing]
-
   def fromList[A](list: List[A]): Stream[A] = list match {
     case Nil => Empty
     case h :: t => Emit(h, () => fromList(t))
@@ -208,5 +207,4 @@ object Stream {
       case e: Throwable => Error(e)
     }
   }
-
 }

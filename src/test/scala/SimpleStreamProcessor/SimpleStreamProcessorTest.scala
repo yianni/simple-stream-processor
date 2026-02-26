@@ -219,5 +219,4 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
 
     assert(windows == List(EventTimeWindow(0L, 5L, List("a"), 8L)))
   }
-
 }
