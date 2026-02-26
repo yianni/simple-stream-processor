@@ -4,7 +4,7 @@ These ADRs define the baseline contracts for stream semantics and implementation
 
 ## Status
 
-- Proposed: 0001-0007
+- Accepted: 0001-0007
 
 ## Engineering Baseline
 
@@ -21,7 +21,7 @@ These ADRs define the baseline contracts for stream semantics and implementation
 
 ## ADR Promotion
 
-- ADRs move from `Proposed` to `Accepted` only after linked implementation PRs are merged and acceptance criteria are met.
+- ADRs in this set are accepted based on merged implementation PRs and passing validation criteria.
 
 ## Index
 

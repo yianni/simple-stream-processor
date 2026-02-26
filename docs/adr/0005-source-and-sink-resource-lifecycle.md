@@ -1,6 +1,6 @@
 # ADR-0005: Source and Sink Resource Lifecycle
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-02-25
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0004: Backpressure Contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-02-25
 
 ## Context
