@@ -3,6 +3,7 @@ package SimpleStreamProcessor
 import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueValue}
 
 import java.util.concurrent.ArrayBlockingQueue
+import scala.collection.mutable
 import scala.concurrent.ExecutionContext
 
 sealed trait Node[I, O] {
@@ -22,6 +23,8 @@ sealed trait Node[I, O] {
     ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
 
   def asyncBoundary(bufferSize: Int): Node[I, O] = AsyncBoundaryPipe(this, bufferSize).withName(this.nodeName + ".asyncBoundary")
+
+  def windowByCount(size: Int): Node[I, List[O]] = CountWindowPipe(this, size).withName(this.nodeName + ".windowByCount")
 
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
@@ -118,6 +121,90 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
   }
 
   override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class CountWindowPipe[I, O](upstream: Node[I, O], size: Int) extends Node[I, List[O]] {
+  def run(input: Stream[I]): Stream[List[O]] = upstream.run(input).grouped(size)
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class Timestamped[+A](value: A, timestampMs: Long)
+case class EventTimeWindow[+A](startMs: Long, endMs: Long, values: List[A], watermarkMs: Long)
+
+sealed trait TimedEvent[+A]
+case class Record[+A](event: Timestamped[A]) extends TimedEvent[A]
+case class Watermark(timestampMs: Long) extends TimedEvent[Nothing]
+
+case class WatermarkPipe[I, O](upstream: Node[I, Timestamped[O]], emitEveryN: Int) extends Node[I, TimedEvent[O]] {
+  def run(input: Stream[I]): Stream[TimedEvent[O]] = {
+    if (emitEveryN <= 0) return Stream.Error(new IllegalArgumentException("emitEveryN must be > 0"))
+
+    val out = mutable.ListBuffer.empty[TimedEvent[O]]
+    var count = 0
+    var maxTimestamp = Long.MinValue
+
+    try {
+      upstream.run(input).foreach { ts =>
+        out += Record(ts)
+        count += 1
+        maxTimestamp = math.max(maxTimestamp, ts.timestampMs)
+        if (count % emitEveryN == 0) out += Watermark(maxTimestamp)
+      }
+
+      if (count > 0 && count % emitEveryN != 0) out += Watermark(maxTimestamp)
+      Stream.fromList(out.toList)
+    } catch {
+      case e: Throwable => Stream.Error(e)
+    }
+  }
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class EventTimeWindowPipe[I, O](upstream: Node[I, TimedEvent[O]], windowSizeMs: Long) extends Node[I, EventTimeWindow[O]] {
+  def run(input: Stream[I]): Stream[EventTimeWindow[O]] = {
+    if (windowSizeMs <= 0) return Stream.Error(new IllegalArgumentException("windowSizeMs must be > 0"))
+
+    val openWindows = mutable.Map.empty[Long, List[O]]
+    val emitted = mutable.ListBuffer.empty[EventTimeWindow[O]]
+
+    try {
+      upstream.run(input).foreach {
+        case Record(Timestamped(value, ts)) =>
+          val start = (ts / windowSizeMs) * windowSizeMs
+          openWindows.update(start, openWindows.getOrElse(start, Nil) :+ value)
+
+        case Watermark(wmTs) =>
+          openWindows.keys
+            .filter(start => start + windowSizeMs <= wmTs)
+            .toList
+            .sorted
+            .foreach { start =>
+              val values = openWindows.remove(start).getOrElse(Nil)
+              emitted += EventTimeWindow(start, start + windowSizeMs, values, wmTs)
+            }
+      }
+
+      Stream.fromList(emitted.toList)
+    } catch {
+      case e: Throwable => Stream.Error(e)
+    }
+  }
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+object NodeSyntax {
+  implicit class TimestampedNodeOps[I, O](private val node: Node[I, Timestamped[O]]) extends AnyVal {
+    def withWatermarks(emitEveryN: Int): Node[I, TimedEvent[O]] =
+      WatermarkPipe(node, emitEveryN).withName(node.toString + ".withWatermarks")
+  }
+
+  implicit class TimedEventNodeOps[I, O](private val node: Node[I, TimedEvent[O]]) extends AnyVal {
+    def windowByEventTime(windowSizeMs: Long): Node[I, EventTimeWindow[O]] =
+      EventTimeWindowPipe(node, windowSizeMs).withName(node.toString + ".windowByEventTime")
+  }
 }
 
 case class ManagedSink[I, O, R <: AutoCloseable](

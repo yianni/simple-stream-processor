@@ -143,6 +143,34 @@ sealed trait Stream[+A] {
     go(this)
   }
 
+  def grouped(size: Int): Stream[List[A]] = {
+    if (size <= 0) return Error(new IllegalArgumentException("group size must be > 0"))
+
+    def takeChunk(s: Stream[A], remaining: Int, acc: List[A]): (List[A], Stream[A]) = {
+      if (remaining <= 0) (acc.reverse, s)
+      else s match {
+        case Emit(a, next) => takeChunk(next(), remaining - 1, a :: acc)
+        case Halt() => (acc.reverse, Halt())
+        case Empty => (acc.reverse, Empty)
+        case Error(e) => throw e
+      }
+    }
+
+    this match {
+      case Halt() => Halt()
+      case Empty => Empty
+      case Error(e) => Error(e)
+      case _ =>
+        try {
+          val (chunk, rest) = takeChunk(this, size, Nil)
+          if (chunk.isEmpty) Halt()
+          else Emit(chunk, () => rest.grouped(size))
+        } catch {
+          case e: Throwable => Error(e)
+        }
+    }
+  }
+
 }
 
 object Stream {

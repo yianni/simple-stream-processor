@@ -1,6 +1,7 @@
 package SimpleStreamProcessor
 
 import org.scalatest.funsuite.AnyFunSuite
+import SimpleStreamProcessor.NodeSyntax._
 
 import scala.concurrent.ExecutionContext
 
@@ -175,6 +176,32 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
 
     assert(result == List(1, 2, 3))
     assert(captured.closed)
+  }
+
+  test("Count windows split stream into fixed-size batches") {
+    val result = Source[Int](Stream.fromList((1 to 7).toList))
+      .windowByCount(3)
+      .run(Stream.Empty)
+      .toList
+
+    assert(result == List(List(1, 2, 3), List(4, 5, 6), List(7)))
+  }
+
+  test("Watermarks are emitted and event-time windows close") {
+    val events = List(
+      Timestamped("a", 1L),
+      Timestamped("b", 3L),
+      Timestamped("c", 7L),
+      Timestamped("d", 8L)
+    )
+
+    val windows = Source[Timestamped[String]](Stream.fromList(events))
+      .withWatermarks(emitEveryN = 2)
+      .windowByEventTime(windowSizeMs = 5L)
+      .run(Stream.Empty)
+      .toList
+
+    assert(windows == List(EventTimeWindow(0L, 5L, List("a", "b"), 8L)))
   }
 
 }
