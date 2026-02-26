@@ -26,6 +26,13 @@ Cancellation rules:
 - On cancellation, no new upstream pulls or task submissions are allowed.
 - Framework still guarantees resource close execution.
 
+Cancellation API contract:
+
+- Pipeline execution APIs must return a cancellable handle (or equivalent) for asynchronous execution.
+- Cancellation request must be idempotent.
+- Cancellation completion must provide a terminal signal (`completed`, `failed`, or `cancelled`).
+- Cancellation must propagate to managed source, async boundaries, and sink processing paths.
+
 ## Invariants
 
 - Managed resources are closed exactly once from framework boundaries.

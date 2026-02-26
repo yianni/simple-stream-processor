@@ -15,6 +15,8 @@ Event-time systems require a policy for watermark generation and late data.
 - Watermark cadence is configurable by operator policy.
 - Initial watermark is `Long.MinValue` unless set by operator strategy.
 - Regressing watermark values are ignored and counted as watermark regressions.
+- Default watermark cadence for built-in watermark operator is every `N` records (`emitEveryN`), where `N` is caller-specified.
+- Watermark configuration is operator-local in v1 (set via operator arguments, not global runtime policy).
 
 ## Invariants
 

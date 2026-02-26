@@ -12,6 +12,17 @@ These ADRs define the baseline contracts for stream semantics and implementation
 - JDK: 17
 - Required validation: deterministic unit tests + concurrency stress tests for boundary/parallel operators
 
+## Stress Suite Minimums
+
+- Backpressure test: fast producer + slow consumer for >= 30s, no deadlock.
+- Boundary memory test: bounded queue depth never exceeds configured capacity.
+- Parallelism test: `parMap` preserves input ordering under variable task latency.
+- Cancellation test: cancellation completes and resources close for boundary and managed source/sink paths.
+
+## ADR Promotion
+
+- ADRs move from `Proposed` to `Accepted` only after linked implementation PRs are merged and acceptance criteria are met.
+
 ## Index
 
 - [0001 Operator Taxonomy and API Boundaries](0001-operator-taxonomy-and-api-boundaries.md)
@@ -23,3 +34,5 @@ These ADRs define the baseline contracts for stream semantics and implementation
 - [0007 Watermark and Late Event Policy](0007-watermark-and-late-event-policy.md)
 - [Error and Cancellation Matrix](error-and-cancellation-matrix.md)
 - [Event-Time Example](event-time-example.md)
+- [Acceptance Criteria](acceptance-criteria.md)
+- [Metric Schema](metric-schema.md)

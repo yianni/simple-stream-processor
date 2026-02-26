@@ -16,6 +16,7 @@ Window operators require explicit closure and emission rules to avoid nondetermi
 - Event-time window closes when `windowEnd <= watermark`.
 - Window size parameters must be `> 0`; otherwise fail fast.
 - End-of-stream without a final watermark does not auto-close incomplete event-time windows in v1.
+- For bounded streams, callers should emit a terminal watermark (`Long.MaxValue`) if all remaining windows must flush.
 
 ## Invariants
 
