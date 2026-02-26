@@ -4,7 +4,7 @@ These ADRs define the baseline contracts for stream semantics and implementation
 
 ## Status
 
-- Proposed: 0001-0007
+- Accepted: 0001-0007
 
 ## Engineering Baseline
 

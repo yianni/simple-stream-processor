@@ -1,6 +1,6 @@
 # ADR-0002: Ordering and Parallelism Contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-02-25
 
 ## Context

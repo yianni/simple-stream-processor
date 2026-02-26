@@ -1,6 +1,6 @@
 # ADR-0006: Windowing Semantics
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-02-25
 
 ## Context

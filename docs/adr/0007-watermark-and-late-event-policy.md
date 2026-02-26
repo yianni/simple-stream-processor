@@ -1,6 +1,6 @@
 # ADR-0007: Watermark and Late Event Policy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-02-25
 
 ## Context

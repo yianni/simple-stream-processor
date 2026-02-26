@@ -1,6 +1,6 @@
 # ADR-0001: Operator Taxonomy and API Boundaries
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-02-25
 
 ## Context
