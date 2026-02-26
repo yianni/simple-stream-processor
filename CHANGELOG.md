@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.1 - 2026-02-26
+
+- Hardened `parMap` execution with cancellation-aware batch scheduling and removed indefinite wait behavior.
+- Hardened async boundary liveness with bounded offer loops, stall detection, and downstream-consumer signaling.
+- Strengthened managed resource precedence semantics (processing failure remains primary, close failures are suppressed and metered).
+- Added Node-level `recoverWith` to align API behavior with ADR recovery semantics.
+- Added CI workflow on GitHub Actions (JDK 17 + `sbt test` + backpressure stress smoke).
+- Expanded regression coverage for cancellation, boundary thread cleanup, and resource precedence paths.
+
 ## v0.1.0 - 2026-02-26
 
 - Added ADR framework and accepted contracts for operator taxonomy, parallelism, error model, backpressure, resource lifecycle, windowing, and watermarks.
