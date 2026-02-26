@@ -48,4 +48,4 @@ system in Scala.
 
 ## Architecture Decisions
 
-Staff-level design contracts are tracked as ADRs in `docs/adr/`.
+Design contracts are tracked as ADRs in `docs/adr/`.
