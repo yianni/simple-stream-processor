@@ -339,4 +339,44 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(captured.closed)
   }
 
+  test("Node runToListAsync returns completed outcome") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val node = Source[Int](Stream.fromList(List(1, 2, 3))).map(_ * 2)
+    val handle = node.runToListAsync(Stream.Empty)
+    val outcome = Await.result(handle.outcome, 2.seconds)
+
+    assert(outcome == ExecutionCompleted(List(2, 4, 6)))
+  }
+
+  test("Managed source runToListAsync cancellation closes resource") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    class FakeResource extends AutoCloseable {
+      @volatile var closed = false
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val source = ManagedSource[Int, FakeResource](
+      resourceFactory = () => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      },
+      streamFactory = _ => Stream.fromList((1 to 5000).toList).map { i =>
+        Thread.sleep(1)
+        i
+      }
+    )
+
+    val handle = source.runToListAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+    assert(captured.closed)
+  }
+
 }

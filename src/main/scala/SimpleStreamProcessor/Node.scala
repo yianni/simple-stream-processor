@@ -33,6 +33,22 @@ sealed trait Node[I, O] {
   def toManagedSink[R <: AutoCloseable](resourceFactory: () => R)(consume: (R, O) => Unit): ManagedSink[I, O, R] =
     ManagedSink(this, resourceFactory, consume).withName(this.nodeName + ".toManagedSink")
 
+  def runToListAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[List[O]] =
+    RuntimeControl.runAsync { token =>
+      @tailrec
+      def loop(stream: Stream[O], acc: List[O]): List[O] = {
+        if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+        stream match {
+          case Stream.Emit(value, next) => loop(next(), value :: acc)
+          case Stream.Halt() => acc.reverse
+          case Stream.Empty => acc.reverse
+          case Stream.Error(e) => throw e
+        }
+      }
+
+      loop(run(input), Nil)
+    }
+
   def withName(name: String): this.type = {
     nodeName = name;
     this
@@ -51,7 +67,12 @@ case class ManagedSource[I, R <: AutoCloseable](resourceFactory: () => R, stream
   def run(input: Stream[Unit]): Stream[I] = {
     val resource = resourceFactory()
     try {
-      streamFactory(resource).ensuring(() => resource.close())
+      val stream = streamFactory(resource)
+      val cancellableStream = RuntimeControl.currentToken match {
+        case Some(token) => stream.takeUntilCancelled(token)
+        case None => stream
+      }
+      cancellableStream.ensuring(() => resource.close())
     } catch {
       case e: Throwable =>
         try resource.close()

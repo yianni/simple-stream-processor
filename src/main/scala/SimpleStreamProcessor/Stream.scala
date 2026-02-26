@@ -201,6 +201,16 @@ sealed trait Stream[+A] {
     }
   }
 
+  def takeUntilCancelled(token: CancellationToken): Stream[A] = {
+    if (token.isCancelled) Halt()
+    else this match {
+      case Emit(a, next) => Emit(a, () => next().takeUntilCancelled(token))
+      case Halt() => Halt()
+      case Empty => Empty
+      case Error(e) => Error(e)
+    }
+  }
+
 }
 
 object Stream {
