@@ -211,6 +211,42 @@ sealed trait Stream[+A] {
     }
   }
 
+  def iterator: Iterator[A] = new Iterator[A] {
+    private var current: Stream[A] = Stream.this
+    private var nextValue: Option[A] = None
+    private var done = false
+
+    private def advance(): Unit = {
+      if (done || nextValue.nonEmpty) return
+      current match {
+        case Emit(a, next) =>
+          nextValue = Some(a)
+          current = next()
+        case Halt() => done = true
+        case Empty => done = true
+        case Error(e) =>
+          done = true
+          Metrics.incUnhandledError()
+          throw e
+      }
+    }
+
+    override def hasNext: Boolean = {
+      advance()
+      nextValue.nonEmpty
+    }
+
+    override def next(): A = {
+      advance()
+      nextValue match {
+        case Some(value) =>
+          nextValue = None
+          value
+        case None => throw new NoSuchElementException("next on empty iterator")
+      }
+    }
+  }
+
 }
 
 object Stream {

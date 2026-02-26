@@ -379,4 +379,45 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(captured.closed)
   }
 
+  test("Node runIterator pulls lazily") {
+    val invoked = new AtomicInteger(0)
+
+    val node = Source[Int](Stream.fromList((1 to 10).toList)).map { i =>
+      invoked.incrementAndGet()
+      i * 2
+    }
+
+    val it = node.runIterator(Stream.Empty)
+    assert(invoked.get() == 1)
+
+    assert(it.next() == 2)
+    assert(invoked.get() == 2)
+
+    assert(it.next() == 4)
+    assert(invoked.get() == 3)
+  }
+
+  test("Node runForeachAsync supports cancellation") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val processed = new AtomicInteger(0)
+
+    val node = Source[Int](Stream.fromList((1 to 2000).toList))
+      .asyncBoundary(8)
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+
+    val handle = node.runForeachAsync(Stream.Empty) { _ =>
+      processed.incrementAndGet()
+    }
+
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+    assert(processed.get() < 2000)
+  }
+
 }

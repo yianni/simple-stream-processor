@@ -49,6 +49,26 @@ sealed trait Node[I, O] {
       loop(run(input), Nil)
     }
 
+  def runForeachAsync(input: Stream[I])(consume: O => Unit)(implicit executionContext: ExecutionContext): ExecutionHandle[Unit] =
+    RuntimeControl.runAsync { token =>
+      @tailrec
+      def loop(stream: Stream[O]): Unit = {
+        if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+        stream match {
+          case Stream.Emit(value, next) =>
+            consume(value)
+            loop(next())
+          case Stream.Halt() =>
+          case Stream.Empty =>
+          case Stream.Error(e) => throw e
+        }
+      }
+
+      loop(run(input))
+    }
+
+  def runIterator(input: Stream[I]): Iterator[O] = run(input).iterator
+
   def withName(name: String): this.type = {
     nodeName = name;
     this
