@@ -11,6 +11,8 @@ sealed trait Node[I, O] {
 
   def filter(f: O => Boolean): Node[I, O] = FilterPipe(this, f).withName(this.nodeName + ".filter")
 
+  def recover(f: PartialFunction[Throwable, O]): Node[I, O] = RecoverPipe(this, f).withName(this.nodeName + ".recover")
+
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
   def withName(name: String): this.type = {
@@ -41,6 +43,12 @@ case class FlatMapPipe[I, O, O2](upstream: Node[I, O], f: O => Stream[O2]) exten
 
 case class FilterPipe[I, O](upstream: Node[I, O], f: O => Boolean) extends Node[I, O] {
   def run(input: Stream[I]): Stream[O] = upstream.run(input).filter(f)
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class RecoverPipe[I, O](upstream: Node[I, O], f: PartialFunction[Throwable, O]) extends Node[I, O] {
+  def run(input: Stream[I]): Stream[O] = upstream.run(input).recover(f)
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
