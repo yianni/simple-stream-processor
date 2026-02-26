@@ -308,19 +308,22 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("Async boundary queue depth stays within configured capacity") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
     val capacity = 4
-    val result = Source[Int](Stream.fromList((1 to 300).toList))
+    val handle = Source[Int](Stream.fromList((1 to 300).toList))
       .asyncBoundary(capacity)
       .map { i =>
         Thread.sleep(1)
         i
       }
-      .run(Stream.Empty)
-      .toList
+      .runToListAsync(Stream.Empty)
 
-    assert(result.size == 300)
-    assert(Metrics.snapshot().boundaryQueueDepthMax <= capacity)
-    assert(Metrics.snapshot().boundaryProducerBlockedMs >= 0)
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    val metrics = handle.metricsSnapshot()
+
+    assert(outcome == ExecutionCompleted((1 to 300).toList))
+    assert(metrics.boundaryQueueDepthMax <= capacity)
+    assert(metrics.boundaryProducerBlockedMs >= 0)
   }
 
   test("Managed sink close failure is recorded") {
