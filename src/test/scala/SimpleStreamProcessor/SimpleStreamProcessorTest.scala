@@ -5,6 +5,8 @@ import org.scalatest.BeforeAndAfterEach
 import SimpleStreamProcessor.NodeSyntax._
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.Await
 import java.util.concurrent.atomic.AtomicInteger
 
 class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
@@ -276,6 +278,65 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
     intercept[RuntimeException](sink.run(Stream.Empty))
     assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
+  test("Sink runAsync returns completed outcome") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3, 4)))
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    val handle = sink.runAsync(Stream.Empty)
+    val outcome = Await.result(handle.outcome, 2.seconds)
+
+    assert(outcome == ExecutionCompleted(10))
+  }
+
+  test("Sink runAsync supports cancellation") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val sink = Source[Int](Stream.fromList((1 to 5000).toList))
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    val handle = sink.runAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+  }
+
+  test("Managed sink runAsync cancellation still closes resource") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    class FakeResource extends AutoCloseable {
+      @volatile var closed = false
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val sink = Source[Int](Stream.fromList((1 to 5000).toList))
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+      .toManagedSink(() => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      })((_, _) => ())
+
+    val handle = sink.runAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+    assert(captured.closed)
   }
 
 }

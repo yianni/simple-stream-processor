@@ -2,9 +2,11 @@ package SimpleStreamProcessor
 
 import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueValue}
 
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ArrayBlockingQueue
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
+import scala.annotation.tailrec
 
 sealed trait Node[I, O] {
   protected var nodeName: String = "Node"
@@ -105,10 +107,13 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
     if (bufferSize <= 0) return Stream.Error(new IllegalArgumentException("bufferSize must be > 0"))
 
     val queue = new ArrayBlockingQueue[QueueSignal[O]](bufferSize)
+    val cancellationToken = RuntimeControl.currentToken
 
     val producer = new Thread(() => {
+      cancellationToken.foreach(_.registerCurrentThread())
       try {
         upstream.run(input).foreach { o =>
+          if (cancellationToken.exists(_.isCancelled)) throw new CancellationException("Pipeline cancelled")
           val startedAtNs = System.nanoTime()
           queue.put(QueueValue(o))
           val blockedMs = (System.nanoTime() - startedAtNs) / 1000000
@@ -118,9 +123,17 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
         queue.put(QueueEnd)
         Metrics.setBoundaryQueueDepth(queue.size())
       } catch {
+        case _: InterruptedException if cancellationToken.exists(_.isCancelled) =>
+          queue.offer(QueueEnd)
+          Metrics.setBoundaryQueueDepth(queue.size())
+        case _: CancellationException =>
+          queue.offer(QueueEnd)
+          Metrics.setBoundaryQueueDepth(queue.size())
         case e: Throwable =>
           queue.put(QueueError(e))
           Metrics.setBoundaryQueueDepth(queue.size())
+      } finally {
+        cancellationToken.foreach(_.unregisterCurrentThread())
       }
     })
 
@@ -258,11 +271,63 @@ case class ManagedSink[I, O, R <: AutoCloseable](
 
   def withName(newName: String): ManagedSink[I, O, R] = this.copy(name = newName)
 
+  def runAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[Unit] =
+    RuntimeControl.runAsync { token =>
+      val resource = resourceFactory()
+      var processingError: Throwable = null
+
+      try {
+        @tailrec
+        def drain(stream: Stream[O]): Unit = {
+          if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+          stream match {
+            case Stream.Emit(value, next) =>
+              consume(resource, value)
+              drain(next())
+            case Stream.Halt() =>
+            case Stream.Empty =>
+            case Stream.Error(e) => throw e
+          }
+        }
+
+        drain(upstream.run(input))
+      } catch {
+        case e: Throwable =>
+          processingError = e
+          throw e
+      } finally {
+        try {
+          resource.close()
+        } catch {
+          case closeError: Throwable =>
+            Metrics.incResourceCloseFailure()
+            if (processingError != null) processingError.addSuppressed(closeError)
+            else throw closeError
+        }
+      }
+    }
+
   override def toString: String = s"$name($upstream)"
 }
 
 case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: String = "Sink") {
   def run(input: Stream[I]): O = upstream.run(input).fold(zero)(f)
+
+  def runAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[O] =
+    RuntimeControl.runAsync { token =>
+      @tailrec
+      def loop(stream: Stream[O], acc: O): O = {
+        if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+        stream match {
+          case Stream.Emit(value, next) => loop(next(), f(acc, value))
+          case Stream.Halt() => acc
+          case Stream.Empty => acc
+          case Stream.Error(e) => throw e
+        }
+      }
+
+      loop(upstream.run(input), zero)
+    }
 
   def withName(newName: String): Sink[I, O] = this.copy(name = newName)
 
