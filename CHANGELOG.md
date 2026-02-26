@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.2 - 2026-02-26
+
+- Added pipeline-scoped metrics collectors with per-execution snapshots on async handles.
+- Added cancellable iterator execution path (`runCancellableIterator`) with cancellation outcome integration.
+- Added Node-level `recoverWith` operator support in the pipeline API.
+- Upgraded CI stress gate from smoke-level to calibrated 10s backpressure validation.
+- Added regression tests for metric scoping and cancellable iterator behavior.
+
 ## v0.1.1 - 2026-02-26
 
 - Hardened `parMap` execution with cancellation-aware batch scheduling and removed indefinite wait behavior.
