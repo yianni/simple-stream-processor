@@ -1,10 +1,10 @@
 ThisBuild / version := "0.1.0-SNAPSHOT"
 
-ThisBuild / scalaVersion := "2.13.10"
+ThisBuild / scalaVersion := "2.13.18"
 
 lazy val root = (project in file("."))
   .settings(
     name := "simple-stream-processor"
   )
 
-libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.16" % Test
+libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.19" % Test
