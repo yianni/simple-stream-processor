@@ -1,11 +1,17 @@
 package SimpleStreamProcessor
 
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.BeforeAndAfterEach
 import SimpleStreamProcessor.NodeSyntax._
 
 import scala.concurrent.ExecutionContext
 
-class SimpleStreamProcessorTest extends AnyFunSuite {
+class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
+
+  override protected def beforeEach(): Unit = {
+    super.beforeEach()
+    Metrics.reset()
+  }
 
   test("Source with map and filter operations") {
     val source: Source[Int] = Source[Int](Stream.fromList((1 to 10).toList)).withName("source")
@@ -37,6 +43,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toList
 
     assert(result == List(10, 5, -1))
+    assert(Metrics.snapshot().unhandledErrorTotal == 0)
   }
 
   test("Sink fails when upstream stream contains an error") {
@@ -45,6 +52,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toSink((acc: Int, i: Int) => acc + i, 0)
 
     intercept[ArithmeticException](sink.run(Stream.Empty))
+    assert(Metrics.snapshot().unhandledErrorTotal > 0)
   }
 
   test("Node recover allows pipeline-level fallback") {
@@ -67,6 +75,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toList
 
     assert(result == List(10, 20, 30, 40))
+    assert(Metrics.snapshot().parMapInFlight == 0)
   }
 
   test("Stream parMap fails fast on invalid parallelism") {
@@ -153,6 +162,7 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
 
     intercept[ArithmeticException](sink.run(Stream.Empty))
     assert(captured.closed)
+    assert(Metrics.snapshot().resourceCloseFailTotal == 0)
   }
 
   test("Managed source closes resource after stream consumption") {
@@ -218,6 +228,36 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toList
 
     assert(windows == List(EventTimeWindow(0L, 5L, List("a"), 8L)))
+    assert(Metrics.snapshot().lateEventDroppedTotal == 1)
+    assert(Metrics.snapshot().watermarkRegressionTotal == 1)
+  }
+
+  test("Async boundary queue depth stays within configured capacity") {
+    val capacity = 4
+    val result = Source[Int](Stream.fromList((1 to 300).toList))
+      .asyncBoundary(capacity)
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+      .run(Stream.Empty)
+      .toList
+
+    assert(result.size == 300)
+    assert(Metrics.snapshot().boundaryQueueDepthMax <= capacity)
+    assert(Metrics.snapshot().boundaryProducerBlockedMs >= 0)
+  }
+
+  test("Managed sink close failure is recorded") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3)))
+      .toManagedSink(() => new BrokenResource)((_, _) => ())
+
+    intercept[RuntimeException](sink.run(Stream.Empty))
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
   }
 
 }

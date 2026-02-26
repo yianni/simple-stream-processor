@@ -59,7 +59,9 @@ sealed trait Stream[+A] {
       case Emit(a, next) => go(next(), f(acc, a))
       case Halt() => acc
       case Empty => acc
-      case Error(e) => throw e
+      case Error(e) =>
+        Metrics.incUnhandledError()
+        throw e
     }
 
     go(this, z)
@@ -71,14 +73,18 @@ sealed trait Stream[+A] {
       next().foreach(f)
     case Halt() =>
     case Empty =>
-    case Error(e) => throw e
+    case Error(e) =>
+      Metrics.incUnhandledError()
+      throw e
   }
 
   final def toList: List[A] = this match {
     case Emit(a, next) => a :: next().toList
     case Halt() => Nil
     case Empty => Nil
-    case Error(e) => throw e
+    case Error(e) =>
+      Metrics.incUnhandledError()
+      throw e
   }
 
   def recover[B >: A](f: PartialFunction[Throwable, B]): Stream[B] =
@@ -101,7 +107,10 @@ sealed trait Stream[+A] {
       val out = toList
         .grouped(parallelism)
         .flatMap { batch =>
-          val batchFutures = batch.map(a => Future(f(a)))
+          val batchFutures = batch.map { a =>
+            Metrics.incParMapInFlight()
+            Future(f(a)).andThen { case _ => Metrics.decParMapInFlight() }
+          }
           Await.result(Future.sequence(batchFutures), Duration.Inf)
         }
         .toList
@@ -200,9 +209,15 @@ object Stream {
   def fromBlockingQueue[A](queue: BlockingQueue[QueueSignal[A]]): Stream[A] = {
     try {
       queue.take() match {
-        case QueueValue(value) => Emit(value, () => fromBlockingQueue(queue))
-        case QueueEnd => Halt()
-        case QueueError(e) => Error(e)
+        case QueueValue(value) =>
+          Metrics.setBoundaryQueueDepth(queue.size())
+          Emit(value, () => fromBlockingQueue(queue))
+        case QueueEnd =>
+          Metrics.setBoundaryQueueDepth(queue.size())
+          Halt()
+        case QueueError(e) =>
+          Metrics.setBoundaryQueueDepth(queue.size())
+          Error(e)
       }
     } catch {
       case e: Throwable => Error(e)

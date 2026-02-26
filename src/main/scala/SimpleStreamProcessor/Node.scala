@@ -54,7 +54,9 @@ case class ManagedSource[I, R <: AutoCloseable](resourceFactory: () => R, stream
       case e: Throwable =>
         try resource.close()
         catch {
-          case closeError: Throwable => e.addSuppressed(closeError)
+          case closeError: Throwable =>
+            Metrics.incResourceCloseFailure()
+            e.addSuppressed(closeError)
         }
         Stream.Error(e)
     }
@@ -106,10 +108,19 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
     val producer = new Thread(() => {
       try {
-        upstream.run(input).foreach(o => queue.put(QueueValue(o)))
+        upstream.run(input).foreach { o =>
+          val startedAtNs = System.nanoTime()
+          queue.put(QueueValue(o))
+          val blockedMs = (System.nanoTime() - startedAtNs) / 1000000
+          Metrics.addBoundaryProducerBlockedMs(blockedMs)
+          Metrics.setBoundaryQueueDepth(queue.size())
+        }
         queue.put(QueueEnd)
+        Metrics.setBoundaryQueueDepth(queue.size())
       } catch {
-        case e: Throwable => queue.put(QueueError(e))
+        case e: Throwable =>
+          queue.put(QueueError(e))
+          Metrics.setBoundaryQueueDepth(queue.size())
       }
     })
 
@@ -176,6 +187,8 @@ case class EventTimeWindowPipe[I, O](upstream: Node[I, TimedEvent[O]], windowSiz
           if (ts >= currentWatermark) {
             val start = (ts / windowSizeMs) * windowSizeMs
             openWindows.update(start, openWindows.getOrElse(start, Nil) :+ value)
+          } else {
+            Metrics.incLateEventDropped()
           }
 
         case Watermark(wmTs) =>
@@ -189,6 +202,8 @@ case class EventTimeWindowPipe[I, O](upstream: Node[I, TimedEvent[O]], windowSiz
                 val values = openWindows.remove(start).getOrElse(Nil)
                 emitted += EventTimeWindow(start, start + windowSizeMs, values, currentWatermark)
               }
+          } else if (wmTs < currentWatermark) {
+            Metrics.incWatermarkRegression()
           }
       }
 
@@ -234,6 +249,7 @@ case class ManagedSink[I, O, R <: AutoCloseable](
         resource.close()
       } catch {
         case closeError: Throwable =>
+          Metrics.incResourceCloseFailure()
           if (processingError != null) processingError.addSuppressed(closeError)
           else throw closeError
       }
