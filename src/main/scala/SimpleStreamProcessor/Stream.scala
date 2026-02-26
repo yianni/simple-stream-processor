@@ -1,6 +1,7 @@
 package SimpleStreamProcessor
 
 import java.util.concurrent.BlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, Future}
 
@@ -108,6 +109,65 @@ sealed trait Stream[+A] {
       Stream.fromList(out)
     } catch {
       case e: Throwable => Error(e)
+    }
+  }
+
+  def ensuring(finalizer: () => Unit): Stream[A] = {
+    val closed = new AtomicBoolean(false)
+
+    def closeOnce(): Unit = {
+      if (closed.compareAndSet(false, true)) finalizer()
+    }
+
+    def go(s: Stream[A]): Stream[A] = s match {
+      case Emit(a, next) =>
+        Emit(a, () => {
+          try go(next())
+          catch {
+            case e: Throwable =>
+              closeOnce()
+              Error(e)
+          }
+        })
+      case Halt() =>
+        closeOnce()
+        Halt()
+      case Empty =>
+        closeOnce()
+        Empty
+      case Error(e) =>
+        closeOnce()
+        Error(e)
+    }
+
+    go(this)
+  }
+
+  def grouped(size: Int): Stream[List[A]] = {
+    if (size <= 0) return Error(new IllegalArgumentException("group size must be > 0"))
+
+    def takeChunk(s: Stream[A], remaining: Int, acc: List[A]): (List[A], Stream[A]) = {
+      if (remaining <= 0) (acc.reverse, s)
+      else s match {
+        case Emit(a, next) => takeChunk(next(), remaining - 1, a :: acc)
+        case Halt() => (acc.reverse, Halt())
+        case Empty => (acc.reverse, Empty)
+        case Error(e) => throw e
+      }
+    }
+
+    this match {
+      case Halt() => Halt()
+      case Empty => Empty
+      case Error(e) => Error(e)
+      case _ =>
+        try {
+          val (chunk, rest) = takeChunk(this, size, Nil)
+          if (chunk.isEmpty) Halt()
+          else Emit(chunk, () => rest.grouped(size))
+        } catch {
+          case e: Throwable => Error(e)
+        }
     }
   }
 

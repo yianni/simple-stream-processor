@@ -1,6 +1,7 @@
 package SimpleStreamProcessor
 
 import org.scalatest.funsuite.AnyFunSuite
+import SimpleStreamProcessor.NodeSyntax._
 
 import scala.concurrent.ExecutionContext
 
@@ -110,5 +111,112 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toSink((acc: Int, i: Int) => acc + i, 0)
 
     intercept[ArithmeticException](sink.run(Stream.Empty))
+  }
+
+  test("Managed sink closes resource after successful processing") {
+    class FakeResource extends AutoCloseable {
+      val values = scala.collection.mutable.ListBuffer.empty[Int]
+      var closed = false
+
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3)))
+      .toManagedSink(() => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      })((resource, value) => resource.values += value)
+
+    sink.run(Stream.Empty)
+
+    assert(captured.values.toList == List(1, 2, 3))
+    assert(captured.closed)
+  }
+
+  test("Managed sink preserves processing error and closes resource") {
+    class FakeResource extends AutoCloseable {
+      var closed = false
+
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .toManagedSink(() => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      })((_, _) => ())
+
+    intercept[ArithmeticException](sink.run(Stream.Empty))
+    assert(captured.closed)
+  }
+
+  test("Managed source closes resource after stream consumption") {
+    class FakeResource extends AutoCloseable {
+      var closed = false
+
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val source = ManagedSource[Int, FakeResource](
+      resourceFactory = () => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      },
+      streamFactory = _ => Stream.fromList(List(1, 2, 3))
+    )
+
+    val result = source.run(Stream.Empty).toList
+
+    assert(result == List(1, 2, 3))
+    assert(captured.closed)
+  }
+
+  test("Count windows split stream into fixed-size batches") {
+    val result = Source[Int](Stream.fromList((1 to 7).toList))
+      .windowByCount(3)
+      .run(Stream.Empty)
+      .toList
+
+    assert(result == List(List(1, 2, 3), List(4, 5, 6), List(7)))
+  }
+
+  test("Watermarks are emitted and event-time windows close") {
+    val events = List(
+      Timestamped("a", 1L),
+      Timestamped("b", 3L),
+      Timestamped("c", 7L),
+      Timestamped("d", 8L)
+    )
+
+    val windows = Source[Timestamped[String]](Stream.fromList(events))
+      .withWatermarks(emitEveryN = 2)
+      .windowByEventTime(windowSizeMs = 5L)
+      .run(Stream.Empty)
+      .toList
+
+    assert(windows == List(EventTimeWindow(0L, 5L, List("a", "b"), 8L)))
+  }
+
+  test("Event-time windows drop late records and ignore regressing watermarks") {
+    val timedEvents = List(
+      Record(Timestamped("a", 1L)),
+      Watermark(8L),
+      Record(Timestamped("late", 4L)),
+      Watermark(7L)
+    )
+
+    val windows = Source[TimedEvent[String]](Stream.fromList(timedEvents))
+      .windowByEventTime(windowSizeMs = 5L)
+      .run(Stream.Empty)
+      .toList
+
+    assert(windows == List(EventTimeWindow(0L, 5L, List("a"), 8L)))
   }
 }
