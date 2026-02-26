@@ -204,4 +204,20 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
     assert(windows == List(EventTimeWindow(0L, 5L, List("a", "b"), 8L)))
   }
 
+  test("Event-time windows drop late records and ignore regressing watermarks") {
+    val timedEvents = List(
+      Record(Timestamped("a", 1L)),
+      Watermark(8L),
+      Record(Timestamped("late", 4L)),
+      Watermark(7L)
+    )
+
+    val windows = Source[TimedEvent[String]](Stream.fromList(timedEvents))
+      .windowByEventTime(windowSizeMs = 5L)
+      .run(Stream.Empty)
+      .toList
+
+    assert(windows == List(EventTimeWindow(0L, 5L, List("a"), 8L)))
+  }
+
 }

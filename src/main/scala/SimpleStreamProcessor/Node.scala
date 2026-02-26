@@ -168,22 +168,28 @@ case class EventTimeWindowPipe[I, O](upstream: Node[I, TimedEvent[O]], windowSiz
 
     val openWindows = mutable.Map.empty[Long, List[O]]
     val emitted = mutable.ListBuffer.empty[EventTimeWindow[O]]
+    var currentWatermark = Long.MinValue
 
     try {
       upstream.run(input).foreach {
         case Record(Timestamped(value, ts)) =>
-          val start = (ts / windowSizeMs) * windowSizeMs
-          openWindows.update(start, openWindows.getOrElse(start, Nil) :+ value)
+          if (ts >= currentWatermark) {
+            val start = (ts / windowSizeMs) * windowSizeMs
+            openWindows.update(start, openWindows.getOrElse(start, Nil) :+ value)
+          }
 
         case Watermark(wmTs) =>
-          openWindows.keys
-            .filter(start => start + windowSizeMs <= wmTs)
-            .toList
-            .sorted
-            .foreach { start =>
-              val values = openWindows.remove(start).getOrElse(Nil)
-              emitted += EventTimeWindow(start, start + windowSizeMs, values, wmTs)
-            }
+          if (wmTs > currentWatermark) {
+            currentWatermark = wmTs
+            openWindows.keys
+              .filter(start => start + windowSizeMs <= currentWatermark)
+              .toList
+              .sorted
+              .foreach { start =>
+                val values = openWindows.remove(start).getOrElse(Nil)
+                emitted += EventTimeWindow(start, start + windowSizeMs, values, currentWatermark)
+              }
+          }
       }
 
       Stream.fromList(emitted.toList)
