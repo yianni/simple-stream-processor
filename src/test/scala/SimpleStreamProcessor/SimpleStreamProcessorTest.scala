@@ -19,4 +19,38 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
     assert(result == 55) // the sum of numbers from 1 to 10
   }
 
+  test("FlatMap keeps processing when branch emits empty stream") {
+    val result = Stream.fromList(List(1, 2, 3))
+      .flatMap(i => if (i % 2 == 0) Stream.fromList(List(i)) else Stream.Empty)
+      .toList
+
+    assert(result == List(2))
+  }
+
+  test("Stream recover converts failures into values") {
+    val result = Stream.fromList(List(1, 2, 0, 4))
+      .map(i => 10 / i)
+      .recover { case _: ArithmeticException => -1 }
+      .toList
+
+    assert(result == List(10, 5, -1))
+  }
+
+  test("Sink fails when upstream stream contains an error") {
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    intercept[ArithmeticException](sink.run(Stream.Empty))
+  }
+
+  test("Node recover allows pipeline-level fallback") {
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .recover { case _: ArithmeticException => 0 }
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    assert(sink.run(Stream.Empty) == 10)
+  }
+
 }

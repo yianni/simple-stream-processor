@@ -9,28 +9,45 @@ sealed trait Stream[+A] {
   import scala.annotation.tailrec
 
   def map[B](f: A => B): Stream[B] = this match {
-    case Emit(a, next) => Emit(f(a), () => next().map(f))
+    case Emit(a, next) =>
+      try Emit(f(a), () => next().map(f))
+      catch {
+        case e: Throwable => Error(e)
+      }
     case Halt() => Halt()
     case Empty => Empty
+    case Error(e) => Error(e)
   }
 
   def flatMap[B](f: A => Stream[B]): Stream[B] = this match {
-    case Emit(a, next) => f(a) append next().flatMap(f)
+    case Emit(a, next) =>
+      try f(a) append next().flatMap(f)
+      catch {
+        case e: Throwable => Error(e)
+      }
     case Halt() => Halt()
     case Empty => Empty
+    case Error(e) => Error(e)
   }
 
   def filter(f: A => Boolean): Stream[A] = this match {
-    case Emit(a, next) if f(a) => Emit(a, () => next().filter(f))
-    case Emit(_, next) => next().filter(f)
+    case Emit(a, next) =>
+      try {
+        if (f(a)) Emit(a, () => next().filter(f))
+        else next().filter(f)
+      } catch {
+        case e: Throwable => Error(e)
+      }
     case Halt() => Halt()
     case Empty => Empty
+    case Error(e) => Error(e)
   }
 
   def append[B >: A](that: => Stream[B]): Stream[B] = this match {
     case Emit(a, next) => Emit(a, () => next().append(that))
     case Halt() => that
-    case Empty => Empty
+    case Empty => that
+    case Error(e) => Error(e)
   }
 
   def fold[B](z: B)(f: (B, A) => B): B = {
@@ -39,6 +56,7 @@ sealed trait Stream[+A] {
       case Emit(a, next) => go(next(), f(acc, a))
       case Halt() => acc
       case Empty => acc
+      case Error(e) => throw e
     }
 
     go(this, z)
@@ -50,12 +68,27 @@ sealed trait Stream[+A] {
       next().foreach(f)
     case Halt() =>
     case Empty =>
+    case Error(e) => throw e
   }
 
   final def toList: List[A] = this match {
     case Emit(a, next) => a :: next().toList
     case Halt() => Nil
     case Empty => Nil
+    case Error(e) => throw e
+  }
+
+  def recover[B >: A](f: PartialFunction[Throwable, B]): Stream[B] =
+    recoverWith {
+      case e if f.isDefinedAt(e) => Emit(f(e), () => Halt())
+    }
+
+  def recoverWith[B >: A](f: PartialFunction[Throwable, Stream[B]]): Stream[B] = this match {
+    case Emit(a, next) => Emit(a, () => next().recoverWith(f))
+    case Halt() => Halt()
+    case Empty => Empty
+    case Error(e) if f.isDefinedAt(e) => f(e)
+    case Error(e) => Error(e)
   }
 
 }
@@ -66,6 +99,8 @@ object Stream {
   case class Halt[A]() extends Stream[A]
 
   case object Empty extends Stream[Nothing]
+
+  case class Error(e: Throwable) extends Stream[Nothing]
 
   def fromList[A](list: List[A]): Stream[A] = list match {
     case Nil => Empty
@@ -78,4 +113,3 @@ object Stream {
   }
 
 }
-
