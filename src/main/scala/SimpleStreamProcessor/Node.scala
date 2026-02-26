@@ -22,7 +22,6 @@ sealed trait Node[I, O] {
     ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
 
   def asyncBoundary(bufferSize: Int): Node[I, O] = AsyncBoundaryPipe(this, bufferSize).withName(this.nodeName + ".asyncBoundary")
-
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
   def withName(name: String): this.type = {
@@ -98,7 +97,6 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
-
 case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: String = "Sink") {
   def run(input: Stream[I]): O = upstream.run(input).fold(zero)(f)
 

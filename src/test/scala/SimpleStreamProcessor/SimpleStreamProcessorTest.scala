@@ -111,5 +111,4 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
 
     intercept[ArithmeticException](sink.run(Stream.Empty))
   }
-
 }
