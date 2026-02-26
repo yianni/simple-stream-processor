@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0 - 2026-02-26
+
+- Completed P2 stabilization with explicit stress invariant suite (`StressInvariantTest`) and reusable stress harness.
+- Added ADR evidence matrix (`docs/adr/evidence-matrix.md`) and P2 execution board (`docs/p2-execution-board.md`).
+- Added performance baseline runner (`PerformanceBaselineReport`) with machine-readable throughput/latency output.
+- Strengthened CI quality gates with explicit stress suite and performance baseline smoke execution.
+- Updated README operational commands for stress and baseline workflows.
+
 ## v0.1.2 - 2026-02-26
 
 - Added pipeline-scoped metrics collectors with per-execution snapshots on async handles.
