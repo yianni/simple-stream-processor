@@ -28,6 +28,24 @@ val sink = Source[Int](Stream.fromList((1 to 100).toList)).withName("source")
 This pipeline applies ordered parallel mapping, filters values, introduces a bounded async boundary for backpressure,
 and aggregates the final stream in a sink.
 
+## Practical Use Cases
+
+`src/main/scala/SimpleStreamProcessor/PracticalUseCases.scala` includes runnable examples for:
+
+- high-value transaction detection via ordered `parMap`
+- log error-burst counting with count windows
+- event-time windowing with watermarks
+- cancellable async iterator consumption for streaming clients
+- managed sink usage with resource-safe audit writing
+
+Run it with:
+
+```bash
+sbt -Dsbt.supershell=false "runMain SimpleStreamProcessor.PracticalUseCases"
+```
+
+For copy-paste snippets by scenario, see `docs/examples.md`.
+
 ## Testing
 
 Tests are written using ScalaTest.
