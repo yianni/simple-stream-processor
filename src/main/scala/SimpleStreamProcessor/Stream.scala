@@ -103,19 +103,40 @@ sealed trait Stream[+A] {
   def parMap[B](parallelism: Int)(f: A => B)(implicit executionContext: ExecutionContext): Stream[B] = {
     if (parallelism <= 0) return Error(new IllegalArgumentException("parallelism must be > 0"))
 
-    try {
-      val out = toList
-        .grouped(parallelism)
-        .flatMap { batch =>
-          val batchFutures = batch.map { a =>
-            Metrics.incParMapInFlight()
-            Future(f(a)).andThen { case _ => Metrics.decParMapInFlight() }
-          }
-          Await.result(Future.sequence(batchFutures), Duration.Inf)
-        }
-        .toList
+    def takeBatch(s: Stream[A], remaining: Int, acc: List[A]): (List[A], Stream[A]) = {
+      if (remaining <= 0) (acc.reverse, s)
+      else s match {
+        case Emit(a, next) => takeBatch(next(), remaining - 1, a :: acc)
+        case Halt() => (acc.reverse, Halt())
+        case Empty => (acc.reverse, Empty)
+        case Error(e) => throw e
+      }
+    }
 
-      Stream.fromList(out)
+    def runBatch(batch: List[A]): List[B] = {
+      val batchFutures = batch.map { a =>
+        Metrics.incParMapInFlight()
+        Future(f(a)).andThen { case _ => Metrics.decParMapInFlight() }
+      }
+      Await.result(Future.sequence(batchFutures), Duration.Inf)
+    }
+
+    def loop(s: Stream[A]): Stream[B] = s match {
+      case Halt() => Halt()
+      case Empty => Empty
+      case Error(e) => Error(e)
+      case _ =>
+        try {
+          val (batch, rest) = takeBatch(s, parallelism, Nil)
+          if (batch.isEmpty) Halt()
+          else Stream.fromList(runBatch(batch)).append(loop(rest))
+        } catch {
+          case e: Throwable => Error(e)
+        }
+    }
+
+    try {
+      loop(this)
     } catch {
       case e: Throwable => Error(e)
     }

@@ -5,6 +5,7 @@ import org.scalatest.BeforeAndAfterEach
 import SimpleStreamProcessor.NodeSyntax._
 
 import scala.concurrent.ExecutionContext
+import java.util.concurrent.atomic.AtomicInteger
 
 class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
@@ -76,6 +77,23 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(result == List(10, 20, 30, 40))
     assert(Metrics.snapshot().parMapInFlight == 0)
+  }
+
+  test("Stream parMap processes work in batches lazily") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val invoked = new AtomicInteger(0)
+
+    val stream = Stream.fromList((1 to 100).toList).parMap(4) { i =>
+      invoked.incrementAndGet()
+      i * 2
+    }
+
+    stream match {
+      case Stream.Emit(_, _) =>
+      case _ => fail("Expected non-empty stream")
+    }
+
+    assert(invoked.get() == 4)
   }
 
   test("Stream parMap fails fast on invalid parallelism") {
