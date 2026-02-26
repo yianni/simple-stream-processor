@@ -122,6 +122,11 @@ object Stream {
 
   case class Error(e: Throwable) extends Stream[Nothing]
 
+  sealed trait QueueSignal[+A]
+  case class QueueValue[A](value: A) extends QueueSignal[A]
+  case object QueueEnd extends QueueSignal[Nothing]
+  case class QueueError(e: Throwable) extends QueueSignal[Nothing]
+
   def fromList[A](list: List[A]): Stream[A] = list match {
     case Nil => Empty
     case h :: t => Emit(h, () => fromList(t))
@@ -130,6 +135,18 @@ object Stream {
   def fromQueue[A](queue: BlockingQueue[A]): Stream[A] = {
     if (queue.isEmpty) Empty
     else Emit(queue.poll(), () => fromQueue(queue))
+  }
+
+  def fromBlockingQueue[A](queue: BlockingQueue[QueueSignal[A]]): Stream[A] = {
+    try {
+      queue.take() match {
+        case QueueValue(value) => Emit(value, () => fromBlockingQueue(queue))
+        case QueueEnd => Halt()
+        case QueueError(e) => Error(e)
+      }
+    } catch {
+      case e: Throwable => Error(e)
+    }
   }
 
 }

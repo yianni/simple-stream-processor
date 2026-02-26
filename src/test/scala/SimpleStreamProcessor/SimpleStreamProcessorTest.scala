@@ -85,4 +85,31 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
     assert(sink.run(Stream.Empty) == 20)
   }
 
+  test("Async boundary preserves stream values") {
+    val result = Source[Int](Stream.fromList(List(1, 2, 3, 4)))
+      .map(_ * 3)
+      .asyncBoundary(2)
+      .run(Stream.Empty)
+      .toList
+
+    assert(result == List(3, 6, 9, 12))
+  }
+
+  test("Async boundary fails fast on invalid buffer size") {
+    val stream = Source[Int](Stream.fromList(List(1, 2, 3)))
+      .asyncBoundary(0)
+      .run(Stream.Empty)
+
+    intercept[IllegalArgumentException](stream.toList)
+  }
+
+  test("Async boundary propagates upstream error") {
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .asyncBoundary(1)
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    intercept[ArithmeticException](sink.run(Stream.Empty))
+  }
+
 }
