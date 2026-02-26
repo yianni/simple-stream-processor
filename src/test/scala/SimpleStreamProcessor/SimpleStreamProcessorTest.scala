@@ -68,6 +68,15 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(sink.run(Stream.Empty) == 10)
   }
 
+  test("Node recoverWith allows stream fallback") {
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .recoverWith { case _: ArithmeticException => Stream.fromList(List(99, 100)) }
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    assert(sink.run(Stream.Empty) == 209)
+  }
+
   test("Stream parMap preserves input order") {
     implicit val executionContext: ExecutionContext = ExecutionContext.global
 

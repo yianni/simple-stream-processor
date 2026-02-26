@@ -24,6 +24,9 @@ sealed trait Node[I, O] {
 
   def recover(f: PartialFunction[Throwable, O]): Node[I, O] = RecoverPipe(this, f).withName(this.nodeName + ".recover")
 
+  def recoverWith(f: PartialFunction[Throwable, Stream[O]]): Node[I, O] =
+    RecoverWithPipe(this, f).withName(this.nodeName + ".recoverWith")
+
   def parMap[O2](parallelism: Int)(f: O => O2)(implicit executionContext: ExecutionContext): Node[I, O2] =
     ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
 
@@ -158,6 +161,12 @@ case class FilterPipe[I, O](upstream: Node[I, O], f: O => Boolean) extends Node[
 
 case class RecoverPipe[I, O](upstream: Node[I, O], f: PartialFunction[Throwable, O]) extends Node[I, O] {
   def run(input: Stream[I]): Stream[O] = upstream.run(input).recover(f)
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class RecoverWithPipe[I, O](upstream: Node[I, O], f: PartialFunction[Throwable, Stream[O]]) extends Node[I, O] {
+  def run(input: Stream[I]): Stream[O] = upstream.run(input).recoverWith(f)
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }
