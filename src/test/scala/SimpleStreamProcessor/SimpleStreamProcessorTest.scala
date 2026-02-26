@@ -8,6 +8,7 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.Await
 import java.util.concurrent.atomic.AtomicInteger
+import scala.jdk.CollectionConverters._
 
 class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
@@ -65,6 +66,15 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
       .toSink((acc: Int, i: Int) => acc + i, 0)
 
     assert(sink.run(Stream.Empty) == 10)
+  }
+
+  test("Node recoverWith allows stream fallback") {
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .recoverWith { case _: ArithmeticException => Stream.fromList(List(99, 100)) }
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    assert(sink.run(Stream.Empty) == 209)
   }
 
   test("Stream parMap preserves input order") {
@@ -206,6 +216,51 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(result == List(1, 2, 3))
     assert(captured.closed)
+  }
+
+  test("Managed sink preserves processing failure and suppresses close failure") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .toManagedSink(() => new BrokenResource)((_, _) => ())
+
+    val error = intercept[ArithmeticException](sink.run(Stream.Empty))
+    assert(error.getSuppressed.exists(_.getMessage == "close-failed"))
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
+  test("Managed source close failure surfaces when processing succeeds") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val source = ManagedSource[Int, BrokenResource](
+      resourceFactory = () => new BrokenResource,
+      streamFactory = _ => Stream.fromList(List(1, 2, 3))
+    )
+
+    val error = intercept[RuntimeException](source.run(Stream.Empty).toList)
+    assert(error.getMessage == "close-failed")
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
+  test("Managed source preserves processing failure and suppresses close failure") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val source = ManagedSource[Int, BrokenResource](
+      resourceFactory = () => new BrokenResource,
+      streamFactory = _ => Stream.Error(new RuntimeException("processing-failed"))
+    )
+
+    val error = intercept[RuntimeException](source.run(Stream.Empty).toList)
+    assert(error.getMessage == "processing-failed")
+    assert(error.getSuppressed.exists(_.getMessage == "close-failed"))
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
   }
 
   test("Count windows split stream into fixed-size batches") {
@@ -418,6 +473,50 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     val outcome = Await.result(handle.outcome, 2.seconds)
     assert(outcome == ExecutionCancelled)
     assert(processed.get() < 2000)
+  }
+
+  test("parMap cancellation stops async execution") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val node = Source[Int](Stream.fromList((1 to 5000).toList))
+      .parMap(4) { i =>
+        Thread.sleep(2)
+        i
+      }
+
+    val handle = node.runToListAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 3.seconds)
+    assert(outcome == ExecutionCancelled)
+  }
+
+  test("async boundary producer thread exits after downstream failure") {
+    val before = Thread.getAllStackTraces.keySet().asScala
+      .filter(_.getName.startsWith("simple-stream-async-boundary-"))
+      .map(_.getId)
+      .toSet
+
+    val stream = Source[Int](Stream.fromList((1 to 10000).toList))
+      .withName("boundary-leak-check")
+      .asyncBoundary(1)
+      .map { i =>
+        if (i == 3) throw new RuntimeException("stop")
+        i
+      }
+      .run(Stream.Empty)
+
+    intercept[RuntimeException](stream.toList)
+
+    Thread.sleep(2500)
+
+    val afterAlive = Thread.getAllStackTraces.keySet().asScala
+      .filter(t => t.getName.startsWith("simple-stream-async-boundary-") && t.isAlive)
+      .map(_.getId)
+      .toSet
+
+    assert(afterAlive.diff(before).isEmpty)
   }
 
 }

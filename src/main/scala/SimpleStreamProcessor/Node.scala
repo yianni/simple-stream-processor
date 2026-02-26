@@ -4,6 +4,9 @@ import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueVal
 
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.TimeUnit
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
 import scala.annotation.tailrec
@@ -20,6 +23,9 @@ sealed trait Node[I, O] {
   def filter(f: O => Boolean): Node[I, O] = FilterPipe(this, f).withName(this.nodeName + ".filter")
 
   def recover(f: PartialFunction[Throwable, O]): Node[I, O] = RecoverPipe(this, f).withName(this.nodeName + ".recover")
+
+  def recoverWith(f: PartialFunction[Throwable, Stream[O]]): Node[I, O] =
+    RecoverWithPipe(this, f).withName(this.nodeName + ".recoverWith")
 
   def parMap[O2](parallelism: Int)(f: O => O2)(implicit executionContext: ExecutionContext): Node[I, O2] =
     ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
@@ -100,20 +106,33 @@ case class Source[I](stream: Stream[I]) extends Node[Unit, I] {
 case class ManagedSource[I, R <: AutoCloseable](resourceFactory: () => R, streamFactory: R => Stream[I]) extends Node[Unit, I] {
   def run(input: Stream[Unit]): Stream[I] = {
     val resource = resourceFactory()
+    val closed = new AtomicBoolean(false)
+
+    def closeResourceOnce(): Unit = {
+      if (closed.compareAndSet(false, true)) {
+        try resource.close()
+        catch {
+          case closeError: Throwable =>
+            Metrics.incResourceCloseFailure()
+            throw closeError
+        }
+      }
+    }
+
     try {
       val stream = streamFactory(resource)
       val cancellableStream = RuntimeControl.currentToken match {
         case Some(token) => stream.takeUntilCancelled(token)
         case None => stream
       }
-      cancellableStream.ensuring(() => resource.close())
+      cancellableStream.ensuring(() => closeResourceOnce())
     } catch {
       case e: Throwable =>
-        try resource.close()
+        try closeResourceOnce()
         catch {
-          case closeError: Throwable =>
-            Metrics.incResourceCloseFailure()
+          case closeError: Throwable if closeError ne e =>
             e.addSuppressed(closeError)
+          case _: Throwable =>
         }
         Stream.Error(e)
     }
@@ -146,6 +165,12 @@ case class RecoverPipe[I, O](upstream: Node[I, O], f: PartialFunction[Throwable,
   override def toString: String = super.toString + "(" + upstream + ")"
 }
 
+case class RecoverWithPipe[I, O](upstream: Node[I, O], f: PartialFunction[Throwable, Stream[O]]) extends Node[I, O] {
+  def run(input: Stream[I]): Stream[O] = upstream.run(input).recoverWith(f)
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
 case class ParMapPipe[I, O, O2](
   upstream: Node[I, O],
   parallelism: Int,
@@ -163,20 +188,34 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
     val queue = new ArrayBlockingQueue[QueueSignal[O]](bufferSize)
     val cancellationToken = RuntimeControl.currentToken
+    val lastConsumerSignalNs = new AtomicLong(System.nanoTime())
+    val stalledConsumerNs = TimeUnit.SECONDS.toNanos(2)
+
+    def putOrAbort(signal: QueueSignal[O]): Unit = {
+      var offered = false
+      while (!offered) {
+        if (cancellationToken.exists(_.isCancelled)) throw new CancellationException("Pipeline cancelled")
+
+        offered = queue.offer(signal, 100, TimeUnit.MILLISECONDS)
+        if (offered) {
+          Metrics.setBoundaryQueueDepth(queue.size())
+        } else {
+          Metrics.addBoundaryProducerBlockedMs(100)
+          val stalledNs = System.nanoTime() - lastConsumerSignalNs.get()
+          if (stalledNs >= stalledConsumerNs) {
+            throw new IllegalStateException("Async boundary consumer stalled")
+          }
+        }
+      }
+    }
 
     val producer = new Thread(() => {
       cancellationToken.foreach(_.registerCurrentThread())
       try {
         upstream.run(input).foreach { o =>
-          if (cancellationToken.exists(_.isCancelled)) throw new CancellationException("Pipeline cancelled")
-          val startedAtNs = System.nanoTime()
-          queue.put(QueueValue(o))
-          val blockedMs = (System.nanoTime() - startedAtNs) / 1000000
-          Metrics.addBoundaryProducerBlockedMs(blockedMs)
-          Metrics.setBoundaryQueueDepth(queue.size())
+          putOrAbort(QueueValue(o))
         }
-        queue.put(QueueEnd)
-        Metrics.setBoundaryQueueDepth(queue.size())
+        putOrAbort(QueueEnd)
       } catch {
         case _: InterruptedException if cancellationToken.exists(_.isCancelled) =>
           queue.offer(QueueEnd)
@@ -185,7 +224,7 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
           queue.offer(QueueEnd)
           Metrics.setBoundaryQueueDepth(queue.size())
         case e: Throwable =>
-          queue.put(QueueError(e))
+          queue.offer(QueueError(e))
           Metrics.setBoundaryQueueDepth(queue.size())
       } finally {
         cancellationToken.foreach(_.unregisterCurrentThread())
@@ -196,7 +235,7 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
     producer.setDaemon(true)
     producer.start()
 
-    Stream.fromBlockingQueue(queue)
+    Stream.fromBlockingQueue(queue, (_: QueueSignal[O]) => lastConsumerSignalNs.set(System.nanoTime()))
   }
 
   override def toString: String = super.toString + "(" + upstream + ")"
