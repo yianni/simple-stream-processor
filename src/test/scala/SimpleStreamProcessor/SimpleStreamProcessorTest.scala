@@ -2,6 +2,8 @@ package SimpleStreamProcessor
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import scala.concurrent.ExecutionContext
+
 class SimpleStreamProcessorTest extends AnyFunSuite {
 
   test("Source with map and filter operations") {
@@ -51,6 +53,36 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
       .toSink((acc: Int, i: Int) => acc + i, 0)
 
     assert(sink.run(Stream.Empty) == 10)
+  }
+
+  test("Stream parMap preserves input order") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val result = Stream.fromList(List(1, 2, 3, 4))
+      .parMap(2) { i =>
+        if (i % 2 == 0) Thread.sleep(15) else Thread.sleep(1)
+        i * 10
+      }
+      .toList
+
+    assert(result == List(10, 20, 30, 40))
+  }
+
+  test("Stream parMap fails fast on invalid parallelism") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val stream = Stream.fromList(List(1, 2, 3)).parMap(0)(identity)
+    intercept[IllegalArgumentException](stream.toList)
+  }
+
+  test("Node parMap works with sink aggregation") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3, 4)))
+      .parMap(2)(_ * 2)
+      .toSink((acc: Int, i: Int) => acc + i, 0)
+
+    assert(sink.run(Stream.Empty) == 20)
   }
 
 }

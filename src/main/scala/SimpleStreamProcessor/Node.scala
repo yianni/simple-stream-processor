@@ -1,5 +1,7 @@
 package SimpleStreamProcessor
 
+import scala.concurrent.ExecutionContext
+
 sealed trait Node[I, O] {
   protected var nodeName: String = "Node"
 
@@ -12,6 +14,9 @@ sealed trait Node[I, O] {
   def filter(f: O => Boolean): Node[I, O] = FilterPipe(this, f).withName(this.nodeName + ".filter")
 
   def recover(f: PartialFunction[Throwable, O]): Node[I, O] = RecoverPipe(this, f).withName(this.nodeName + ".recover")
+
+  def parMap[O2](parallelism: Int)(f: O => O2)(implicit executionContext: ExecutionContext): Node[I, O2] =
+    ParMapPipe(this, parallelism, f, executionContext).withName(this.nodeName + ".parMap")
 
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
@@ -49,6 +54,17 @@ case class FilterPipe[I, O](upstream: Node[I, O], f: O => Boolean) extends Node[
 
 case class RecoverPipe[I, O](upstream: Node[I, O], f: PartialFunction[Throwable, O]) extends Node[I, O] {
   def run(input: Stream[I]): Stream[O] = upstream.run(input).recover(f)
+
+  override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class ParMapPipe[I, O, O2](
+  upstream: Node[I, O],
+  parallelism: Int,
+  f: O => O2,
+  executionContext: ExecutionContext
+) extends Node[I, O2] {
+  def run(input: Stream[I]): Stream[O2] = upstream.run(input).parMap(parallelism)(f)(executionContext)
 
   override def toString: String = super.toString + "(" + upstream + ")"
 }

@@ -1,6 +1,8 @@
 package SimpleStreamProcessor
 
 import java.util.concurrent.BlockingQueue
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, ExecutionContext, Future}
 
 sealed trait Stream[+A] {
 
@@ -89,6 +91,24 @@ sealed trait Stream[+A] {
     case Empty => Empty
     case Error(e) if f.isDefinedAt(e) => f(e)
     case Error(e) => Error(e)
+  }
+
+  def parMap[B](parallelism: Int)(f: A => B)(implicit executionContext: ExecutionContext): Stream[B] = {
+    if (parallelism <= 0) return Error(new IllegalArgumentException("parallelism must be > 0"))
+
+    try {
+      val out = toList
+        .grouped(parallelism)
+        .flatMap { batch =>
+          val batchFutures = batch.map(a => Future(f(a)))
+          Await.result(Future.sequence(batchFutures), Duration.Inf)
+        }
+        .toList
+
+      Stream.fromList(out)
+    } catch {
+      case e: Throwable => Error(e)
+    }
   }
 
 }
