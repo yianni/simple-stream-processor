@@ -45,3 +45,7 @@ such as:
 
 This project serves as a good starting point for anyone interested in learning about or building a stream processing
 system in Scala.
+
+## Architecture Decisions
+
+Design contracts are tracked as ADRs in `docs/adr/`.
