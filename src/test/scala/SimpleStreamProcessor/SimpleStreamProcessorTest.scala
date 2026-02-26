@@ -209,6 +209,51 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(captured.closed)
   }
 
+  test("Managed sink preserves processing failure and suppresses close failure") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .toManagedSink(() => new BrokenResource)((_, _) => ())
+
+    val error = intercept[ArithmeticException](sink.run(Stream.Empty))
+    assert(error.getSuppressed.exists(_.getMessage == "close-failed"))
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
+  test("Managed source close failure surfaces when processing succeeds") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val source = ManagedSource[Int, BrokenResource](
+      resourceFactory = () => new BrokenResource,
+      streamFactory = _ => Stream.fromList(List(1, 2, 3))
+    )
+
+    val error = intercept[RuntimeException](source.run(Stream.Empty).toList)
+    assert(error.getMessage == "close-failed")
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
+  test("Managed source preserves processing failure and suppresses close failure") {
+    class BrokenResource extends AutoCloseable {
+      override def close(): Unit = throw new RuntimeException("close-failed")
+    }
+
+    val source = ManagedSource[Int, BrokenResource](
+      resourceFactory = () => new BrokenResource,
+      streamFactory = _ => Stream.Error(new RuntimeException("processing-failed"))
+    )
+
+    val error = intercept[RuntimeException](source.run(Stream.Empty).toList)
+    assert(error.getMessage == "processing-failed")
+    assert(error.getSuppressed.exists(_.getMessage == "close-failed"))
+    assert(Metrics.snapshot().resourceCloseFailTotal == 1)
+  }
+
   test("Count windows split stream into fixed-size batches") {
     val result = Source[Int](Stream.fromList((1 to 7).toList))
       .windowByCount(3)

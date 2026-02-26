@@ -5,6 +5,7 @@ import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueVal
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
@@ -102,20 +103,33 @@ case class Source[I](stream: Stream[I]) extends Node[Unit, I] {
 case class ManagedSource[I, R <: AutoCloseable](resourceFactory: () => R, streamFactory: R => Stream[I]) extends Node[Unit, I] {
   def run(input: Stream[Unit]): Stream[I] = {
     val resource = resourceFactory()
+    val closed = new AtomicBoolean(false)
+
+    def closeResourceOnce(): Unit = {
+      if (closed.compareAndSet(false, true)) {
+        try resource.close()
+        catch {
+          case closeError: Throwable =>
+            Metrics.incResourceCloseFailure()
+            throw closeError
+        }
+      }
+    }
+
     try {
       val stream = streamFactory(resource)
       val cancellableStream = RuntimeControl.currentToken match {
         case Some(token) => stream.takeUntilCancelled(token)
         case None => stream
       }
-      cancellableStream.ensuring(() => resource.close())
+      cancellableStream.ensuring(() => closeResourceOnce())
     } catch {
       case e: Throwable =>
-        try resource.close()
+        try closeResourceOnce()
         catch {
-          case closeError: Throwable =>
-            Metrics.incResourceCloseFailure()
+          case closeError: Throwable if closeError ne e =>
             e.addSuppressed(closeError)
+          case _: Throwable =>
         }
         Stream.Error(e)
     }
