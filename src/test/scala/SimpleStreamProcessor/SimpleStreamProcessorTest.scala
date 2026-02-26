@@ -519,4 +519,44 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(afterAlive.diff(before).isEmpty)
   }
 
+  test("runAsync metrics are scoped per execution handle") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    Metrics.reset()
+    val timedEvents = List(
+      Record(Timestamped("a", 1L)),
+      Watermark(8L),
+      Record(Timestamped("late", 4L))
+    )
+
+    val node = Source[TimedEvent[String]](Stream.fromList(timedEvents))
+      .windowByEventTime(windowSizeMs = 5L)
+
+    val handle = node.runToListAsync(Stream.Empty)
+    val outcome = Await.result(handle.outcome, 2.seconds)
+
+    assert(outcome.isInstanceOf[ExecutionCompleted[_]])
+    assert(Metrics.snapshot().lateEventDroppedTotal == 0)
+    assert(handle.metricsSnapshot().lateEventDroppedTotal == 1)
+  }
+
+  test("Node runCancellableIterator supports cancellation") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val node = Source[Int](Stream.fromList((1 to 5000).toList))
+      .map { i =>
+        Thread.sleep(1)
+        i
+      }
+
+    val cancellable = node.runCancellableIterator(Stream.Empty, bufferSize = 8)
+
+    assert(cancellable.iterator.next() == 1)
+    Thread.sleep(10)
+    cancellable.cancel()
+
+    val outcome = Await.result(cancellable.outcome, 2.seconds)
+    assert(outcome == ExecutionCancelled)
+  }
+
 }

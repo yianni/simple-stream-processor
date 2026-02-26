@@ -10,7 +10,18 @@ case class ExecutionCompleted[A](value: A) extends ExecutionOutcome[A]
 case class ExecutionFailed(error: Throwable) extends ExecutionOutcome[Nothing]
 case object ExecutionCancelled extends ExecutionOutcome[Nothing]
 
-case class ExecutionHandle[+A](outcome: Future[ExecutionOutcome[A]], cancel: () => Unit)
+case class ExecutionHandle[+A](
+  outcome: Future[ExecutionOutcome[A]],
+  cancel: () => Unit,
+  metricsSnapshot: () => Metrics.Snapshot
+)
+
+case class CancellableIterator[+A](
+  iterator: Iterator[A],
+  cancel: () => Unit,
+  outcome: Future[ExecutionOutcome[Unit]],
+  metricsSnapshot: () => Metrics.Snapshot
+)
 
 final class CancellationToken {
   private val cancelled = new AtomicBoolean(false)
@@ -57,22 +68,25 @@ object RuntimeControl {
 
   def runAsync[A](compute: CancellationToken => A)(implicit executionContext: ExecutionContext): ExecutionHandle[A] = {
     val token = new CancellationToken
+    val collector = Metrics.newCollector()
     val future = Future {
-      RuntimeControl.withToken(token) {
-        token.registerCurrentThread()
-        try {
-          if (token.isCancelled) ExecutionCancelled
-          else ExecutionCompleted(compute(token))
-        } catch {
-          case _: CancellationException => ExecutionCancelled
-          case _: InterruptedException if token.isCancelled => ExecutionCancelled
-          case e: Throwable => ExecutionFailed(e)
-        } finally {
-          token.unregisterCurrentThread()
+      Metrics.withCollector(collector) {
+        RuntimeControl.withToken(token) {
+          token.registerCurrentThread()
+          try {
+            if (token.isCancelled) ExecutionCancelled
+            else ExecutionCompleted(compute(token))
+          } catch {
+            case _: CancellationException => ExecutionCancelled
+            case _: InterruptedException if token.isCancelled => ExecutionCancelled
+            case e: Throwable => ExecutionFailed(e)
+          } finally {
+            token.unregisterCurrentThread()
+          }
         }
       }
     }
 
-    ExecutionHandle(future, () => token.cancel())
+    ExecutionHandle(future, () => token.cancel(), () => collector.snapshot())
   }
 }
