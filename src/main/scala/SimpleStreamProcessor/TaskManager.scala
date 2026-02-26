@@ -6,7 +6,7 @@ class TaskManager(totalSlots: Int)(implicit executionContext: ExecutionContext) 
   private var availableSlots: Int = totalSlots
 
   def submit[A](job: () => A): Future[A] = synchronized {
-    if (availableSlots <= 0) throw new Exception("No available slots in the Task Manager")
+    if (availableSlots <= 0) throw new IllegalStateException("No available slots in the Task Manager")
     availableSlots -= 1
     val promise = Promise[A]()
     executionContext.execute(() => {
@@ -15,7 +15,9 @@ class TaskManager(totalSlots: Int)(implicit executionContext: ExecutionContext) 
       } catch {
         case e: Throwable => promise.failure(e)
       } finally {
-        availableSlots += 1
+        synchronized {
+          availableSlots += 1
+        }
       }
     })
     promise.future

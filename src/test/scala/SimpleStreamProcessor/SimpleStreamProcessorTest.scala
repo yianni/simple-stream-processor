@@ -7,6 +7,7 @@ import SimpleStreamProcessor.NodeSyntax._
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.Await
+import scala.concurrent.Promise
 import java.util.concurrent.atomic.AtomicInteger
 import scala.jdk.CollectionConverters._
 
@@ -560,6 +561,42 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
     val outcome = Await.result(cancellable.outcome, 2.seconds)
     assert(outcome == ExecutionCancelled)
+  }
+
+  test("TaskManager releases slot when job fails") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val taskManager = new TaskManager(1)
+
+    val failed = taskManager.submit(() => throw new RuntimeException("boom"))
+    intercept[RuntimeException](Await.result(failed, 1.second))
+
+    val succeeded = taskManager.submit(() => 42)
+    assert(Await.result(succeeded, 1.second) == 42)
+  }
+
+  test("JobManager can schedule onto another task manager when one is full") {
+    val jobManager = new JobManager(numberOfTaskManagers = 2, slotsPerTaskManager = 1)
+    val started = Promise[Unit]()
+    val release = Promise[Unit]()
+
+    try {
+      val first = jobManager.submit(() => {
+        started.success(())
+        Await.result(release.future, 2.seconds)
+        1
+      })
+
+      Await.result(started.future, 1.second)
+
+      val second = jobManager.submit(() => 2)
+      assert(Await.result(second, 1.second) == 2)
+
+      release.success(())
+      assert(Await.result(first, 2.seconds) == 1)
+    } finally {
+      release.trySuccess(())
+      jobManager.shutdown()
+    }
   }
 
 }
