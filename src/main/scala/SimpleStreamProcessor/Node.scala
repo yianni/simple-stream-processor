@@ -35,9 +35,16 @@ sealed trait Node[I, O] {
 
   def runToListAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[List[O]] =
     RuntimeControl.runAsync { token =>
+      def finalizeOnCancel(stream: Stream[O]): Unit = {
+        stream.takeUntilCancelled(token).foreach(_ => ())
+      }
+
       @tailrec
       def loop(stream: Stream[O], acc: List[O]): List[O] = {
-        if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+        if (token.isCancelled) {
+          finalizeOnCancel(stream)
+          throw new CancellationException("Pipeline cancelled")
+        }
         stream match {
           case Stream.Emit(value, next) => loop(next(), value :: acc)
           case Stream.Halt() => acc.reverse
@@ -51,9 +58,16 @@ sealed trait Node[I, O] {
 
   def runForeachAsync(input: Stream[I])(consume: O => Unit)(implicit executionContext: ExecutionContext): ExecutionHandle[Unit] =
     RuntimeControl.runAsync { token =>
+      def finalizeOnCancel(stream: Stream[O]): Unit = {
+        stream.takeUntilCancelled(token).foreach(_ => ())
+      }
+
       @tailrec
       def loop(stream: Stream[O]): Unit = {
-        if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+        if (token.isCancelled) {
+          finalizeOnCancel(stream)
+          throw new CancellationException("Pipeline cancelled")
+        }
         stream match {
           case Stream.Emit(value, next) =>
             consume(value)
@@ -356,9 +370,16 @@ case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: Strin
 
   def runAsync(input: Stream[I])(implicit executionContext: ExecutionContext): ExecutionHandle[O] =
     RuntimeControl.runAsync { token =>
+      def finalizeOnCancel(stream: Stream[O]): Unit = {
+        stream.takeUntilCancelled(token).foreach(_ => ())
+      }
+
       @tailrec
       def loop(stream: Stream[O], acc: O): O = {
-        if (token.isCancelled) throw new CancellationException("Pipeline cancelled")
+        if (token.isCancelled) {
+          finalizeOnCancel(stream)
+          throw new CancellationException("Pipeline cancelled")
+        }
         stream match {
           case Stream.Emit(value, next) => loop(next(), f(acc, value))
           case Stream.Halt() => acc
