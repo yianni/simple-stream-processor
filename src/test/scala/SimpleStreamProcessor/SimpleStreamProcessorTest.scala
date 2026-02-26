@@ -112,4 +112,69 @@ class SimpleStreamProcessorTest extends AnyFunSuite {
     intercept[ArithmeticException](sink.run(Stream.Empty))
   }
 
+  test("Managed sink closes resource after successful processing") {
+    class FakeResource extends AutoCloseable {
+      val values = scala.collection.mutable.ListBuffer.empty[Int]
+      var closed = false
+
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val sink = Source[Int](Stream.fromList(List(1, 2, 3)))
+      .toManagedSink(() => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      })((resource, value) => resource.values += value)
+
+    sink.run(Stream.Empty)
+
+    assert(captured.values.toList == List(1, 2, 3))
+    assert(captured.closed)
+  }
+
+  test("Managed sink preserves processing error and closes resource") {
+    class FakeResource extends AutoCloseable {
+      var closed = false
+
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val sink = Source[Int](Stream.fromList(List(1, 0, 2)))
+      .map(i => 10 / i)
+      .toManagedSink(() => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      })((_, _) => ())
+
+    intercept[ArithmeticException](sink.run(Stream.Empty))
+    assert(captured.closed)
+  }
+
+  test("Managed source closes resource after stream consumption") {
+    class FakeResource extends AutoCloseable {
+      var closed = false
+
+      override def close(): Unit = closed = true
+    }
+
+    var captured: FakeResource = null
+    val source = ManagedSource[Int, FakeResource](
+      resourceFactory = () => {
+        val resource = new FakeResource
+        captured = resource
+        resource
+      },
+      streamFactory = _ => Stream.fromList(List(1, 2, 3))
+    )
+
+    val result = source.run(Stream.Empty).toList
+
+    assert(result == List(1, 2, 3))
+    assert(captured.closed)
+  }
+
 }

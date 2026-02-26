@@ -25,6 +25,9 @@ sealed trait Node[I, O] {
 
   def toSink(f: (O, O) => O, zero: O): Sink[I, O] = Sink(this, f, zero).withName(this.nodeName + ".toSink")
 
+  def toManagedSink[R <: AutoCloseable](resourceFactory: () => R)(consume: (R, O) => Unit): ManagedSink[I, O, R] =
+    ManagedSink(this, resourceFactory, consume).withName(this.nodeName + ".toManagedSink")
+
   def withName(name: String): this.type = {
     nodeName = name;
     this
@@ -35,6 +38,24 @@ sealed trait Node[I, O] {
 
 case class Source[I](stream: Stream[I]) extends Node[Unit, I] {
   def run(input: Stream[Unit]): Stream[I] = stream
+
+  override def toString: String = super.toString
+}
+
+case class ManagedSource[I, R <: AutoCloseable](resourceFactory: () => R, streamFactory: R => Stream[I]) extends Node[Unit, I] {
+  def run(input: Stream[Unit]): Stream[I] = {
+    val resource = resourceFactory()
+    try {
+      streamFactory(resource).ensuring(() => resource.close())
+    } catch {
+      case e: Throwable =>
+        try resource.close()
+        catch {
+          case closeError: Throwable => e.addSuppressed(closeError)
+        }
+        Stream.Error(e)
+    }
+  }
 
   override def toString: String = super.toString
 }
@@ -97,6 +118,38 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
   }
 
   override def toString: String = super.toString + "(" + upstream + ")"
+}
+
+case class ManagedSink[I, O, R <: AutoCloseable](
+  upstream: Node[I, O],
+  resourceFactory: () => R,
+  consume: (R, O) => Unit,
+  name: String = "ManagedSink"
+) {
+  def run(input: Stream[I]): Unit = {
+    val resource = resourceFactory()
+    var processingError: Throwable = null
+
+    try {
+      upstream.run(input).foreach(value => consume(resource, value))
+    } catch {
+      case e: Throwable =>
+        processingError = e
+        throw e
+    } finally {
+      try {
+        resource.close()
+      } catch {
+        case closeError: Throwable =>
+          if (processingError != null) processingError.addSuppressed(closeError)
+          else throw closeError
+      }
+    }
+  }
+
+  def withName(newName: String): ManagedSink[I, O, R] = this.copy(name = newName)
+
+  override def toString: String = s"$name($upstream)"
 }
 
 case class Sink[I, O](upstream: Node[I, O], f: (O, O) => O, zero: O, name: String = "Sink") {

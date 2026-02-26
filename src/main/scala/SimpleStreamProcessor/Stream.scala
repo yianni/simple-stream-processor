@@ -1,6 +1,7 @@
 package SimpleStreamProcessor
 
 import java.util.concurrent.BlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, Future}
 
@@ -109,6 +110,37 @@ sealed trait Stream[+A] {
     } catch {
       case e: Throwable => Error(e)
     }
+  }
+
+  def ensuring(finalizer: () => Unit): Stream[A] = {
+    val closed = new AtomicBoolean(false)
+
+    def closeOnce(): Unit = {
+      if (closed.compareAndSet(false, true)) finalizer()
+    }
+
+    def go(s: Stream[A]): Stream[A] = s match {
+      case Emit(a, next) =>
+        Emit(a, () => {
+          try go(next())
+          catch {
+            case e: Throwable =>
+              closeOnce()
+              Error(e)
+          }
+        })
+      case Halt() =>
+        closeOnce()
+        Halt()
+      case Empty =>
+        closeOnce()
+        Empty
+      case Error(e) =>
+        closeOnce()
+        Error(e)
+    }
+
+    go(this)
   }
 
 }
