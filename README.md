@@ -44,6 +44,18 @@ Run calibrated backpressure stress validation (30s target):
 sbt -Dsbt.supershell=false "Test / runMain SimpleStreamProcessor.BackpressureStressValidation 30000"
 ```
 
+Run deterministic stress invariants suite:
+
+```bash
+sbt -Dsbt.supershell=false "Test / testOnly SimpleStreamProcessor.StressInvariantTest"
+```
+
+Run performance baseline snapshot:
+
+```bash
+sbt -Dsbt.supershell=false "Test / runMain SimpleStreamProcessor.PerformanceBaselineReport"
+```
+
 ## Current Scope Notes
 
 This implementation is single-process and in-memory. It is designed to validate pipeline semantics and concurrency

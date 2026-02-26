@@ -26,5 +26,11 @@ jobs:
       - name: Run unit tests
         run: sbt -Dsbt.supershell=false test
 
+      - name: Run stress invariant suite
+        run: sbt -Dsbt.supershell=false "Test / testOnly SimpleStreamProcessor.StressInvariantTest"
+
       - name: Run backpressure stress assertions
         run: sbt -Dsbt.supershell=false "Test / runMain SimpleStreamProcessor.BackpressureStressValidation 10000"
+
+      - name: Run performance baseline smoke
+        run: sbt -Dsbt.supershell=false "Test / runMain SimpleStreamProcessor.PerformanceBaselineReport 5000 4 16"

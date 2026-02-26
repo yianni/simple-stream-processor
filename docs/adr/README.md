@@ -36,3 +36,4 @@ These ADRs define the baseline contracts for stream semantics and implementation
 - [Event-Time Example](event-time-example.md)
 - [Acceptance Criteria](acceptance-criteria.md)
 - [Metric Schema](metric-schema.md)
+- [Evidence Matrix](evidence-matrix.md)
