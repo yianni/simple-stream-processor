@@ -4,6 +4,8 @@ import SimpleStreamProcessor.Stream.{QueueEnd, QueueError, QueueSignal, QueueVal
 
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.TimeUnit
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
 import scala.annotation.tailrec
@@ -163,20 +165,34 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
 
     val queue = new ArrayBlockingQueue[QueueSignal[O]](bufferSize)
     val cancellationToken = RuntimeControl.currentToken
+    val lastConsumerSignalNs = new AtomicLong(System.nanoTime())
+    val stalledConsumerNs = TimeUnit.SECONDS.toNanos(2)
+
+    def putOrAbort(signal: QueueSignal[O]): Unit = {
+      var offered = false
+      while (!offered) {
+        if (cancellationToken.exists(_.isCancelled)) throw new CancellationException("Pipeline cancelled")
+
+        offered = queue.offer(signal, 100, TimeUnit.MILLISECONDS)
+        if (offered) {
+          Metrics.setBoundaryQueueDepth(queue.size())
+        } else {
+          Metrics.addBoundaryProducerBlockedMs(100)
+          val stalledNs = System.nanoTime() - lastConsumerSignalNs.get()
+          if (stalledNs >= stalledConsumerNs) {
+            throw new IllegalStateException("Async boundary consumer stalled")
+          }
+        }
+      }
+    }
 
     val producer = new Thread(() => {
       cancellationToken.foreach(_.registerCurrentThread())
       try {
         upstream.run(input).foreach { o =>
-          if (cancellationToken.exists(_.isCancelled)) throw new CancellationException("Pipeline cancelled")
-          val startedAtNs = System.nanoTime()
-          queue.put(QueueValue(o))
-          val blockedMs = (System.nanoTime() - startedAtNs) / 1000000
-          Metrics.addBoundaryProducerBlockedMs(blockedMs)
-          Metrics.setBoundaryQueueDepth(queue.size())
+          putOrAbort(QueueValue(o))
         }
-        queue.put(QueueEnd)
-        Metrics.setBoundaryQueueDepth(queue.size())
+        putOrAbort(QueueEnd)
       } catch {
         case _: InterruptedException if cancellationToken.exists(_.isCancelled) =>
           queue.offer(QueueEnd)
@@ -185,7 +201,7 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
           queue.offer(QueueEnd)
           Metrics.setBoundaryQueueDepth(queue.size())
         case e: Throwable =>
-          queue.put(QueueError(e))
+          queue.offer(QueueError(e))
           Metrics.setBoundaryQueueDepth(queue.size())
       } finally {
         cancellationToken.foreach(_.unregisterCurrentThread())
@@ -196,7 +212,7 @@ case class AsyncBoundaryPipe[I, O](upstream: Node[I, O], bufferSize: Int) extend
     producer.setDaemon(true)
     producer.start()
 
-    Stream.fromBlockingQueue(queue)
+    Stream.fromBlockingQueue(queue, (_: QueueSignal[O]) => lastConsumerSignalNs.set(System.nanoTime()))
   }
 
   override def toString: String = super.toString + "(" + upstream + ")"

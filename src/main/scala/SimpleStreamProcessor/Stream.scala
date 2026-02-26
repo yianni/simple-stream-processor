@@ -2,8 +2,8 @@ package SimpleStreamProcessor
 
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, ExecutionContext, Future}
+import java.util.concurrent.{Callable, ExecutorCompletionService, Executors, TimeUnit}
+import scala.concurrent.ExecutionContext
 
 sealed trait Stream[+A] {
 
@@ -114,11 +114,53 @@ sealed trait Stream[+A] {
     }
 
     def runBatch(batch: List[A]): List[B] = {
-      val batchFutures = batch.map { a =>
-        Metrics.incParMapInFlight()
-        Future(f(a)).andThen { case _ => Metrics.decParMapInFlight() }
+      val cancellationToken = RuntimeControl.currentToken
+      val executor = Executors.newFixedThreadPool(parallelism)
+      val completion = new ExecutorCompletionService[(Int, Either[Throwable, B])](executor)
+      val results = Array.fill[Option[B]](batch.size)(None)
+
+      try {
+        batch.zipWithIndex.foreach {
+          case (value, index) =>
+            completion.submit(new Callable[(Int, Either[Throwable, B])] {
+              override def call(): (Int, Either[Throwable, B]) = {
+                if (cancellationToken.exists(_.isCancelled)) {
+                  (index, Left(new java.util.concurrent.CancellationException("Pipeline cancelled")))
+                } else {
+                  Metrics.incParMapInFlight()
+                  try {
+                    (index, Right(f(value)))
+                  } catch {
+                    case e: Throwable => (index, Left(e))
+                  } finally {
+                    Metrics.decParMapInFlight()
+                  }
+                }
+              }
+            })
+        }
+
+        var completed = 0
+        while (completed < batch.size) {
+          if (cancellationToken.exists(_.isCancelled)) {
+            throw new java.util.concurrent.CancellationException("Pipeline cancelled")
+          }
+
+          val future = completion.poll(100, TimeUnit.MILLISECONDS)
+          if (future != null) {
+            val (index, result) = future.get()
+            result match {
+              case Right(mapped) => results(index) = Some(mapped)
+              case Left(error) => throw error
+            }
+            completed += 1
+          }
+        }
+
+        results.iterator.collect { case Some(value) => value }.toList
+      } finally {
+        executor.shutdownNow()
       }
-      Await.result(Future.sequence(batchFutures), Duration.Inf)
     }
 
     def loop(s: Stream[A]): Stream[B] = s match {
@@ -145,8 +187,15 @@ sealed trait Stream[+A] {
   def ensuring(finalizer: () => Unit): Stream[A] = {
     val closed = new AtomicBoolean(false)
 
-    def closeOnce(): Unit = {
-      if (closed.compareAndSet(false, true)) finalizer()
+    def closeOnce(): Option[Throwable] = {
+      if (closed.compareAndSet(false, true)) {
+        try {
+          finalizer()
+          None
+        } catch {
+          case e: Throwable => Some(e)
+        }
+      } else None
     }
 
     def go(s: Stream[A]): Stream[A] = s match {
@@ -155,18 +204,22 @@ sealed trait Stream[+A] {
           try go(next())
           catch {
             case e: Throwable =>
-              closeOnce()
+              closeOnce().foreach(e.addSuppressed)
               Error(e)
           }
         })
       case Halt() =>
-        closeOnce()
-        Halt()
+        closeOnce() match {
+          case Some(closeError) => Error(closeError)
+          case None => Halt()
+        }
       case Empty =>
-        closeOnce()
-        Empty
+        closeOnce() match {
+          case Some(closeError) => Error(closeError)
+          case None => Empty
+        }
       case Error(e) =>
-        closeOnce()
+        closeOnce().foreach(e.addSuppressed)
         Error(e)
     }
 
@@ -273,12 +326,14 @@ object Stream {
     else Emit(queue.poll(), () => fromQueue(queue))
   }
 
-  def fromBlockingQueue[A](queue: BlockingQueue[QueueSignal[A]]): Stream[A] = {
+  def fromBlockingQueue[A](queue: BlockingQueue[QueueSignal[A]], onSignal: QueueSignal[A] => Unit = (_: QueueSignal[A]) => ()): Stream[A] = {
     try {
-      queue.take() match {
+      val signal = queue.take()
+      onSignal(signal)
+      signal match {
         case QueueValue(value) =>
           Metrics.setBoundaryQueueDepth(queue.size())
-          Emit(value, () => fromBlockingQueue(queue))
+          Emit(value, () => fromBlockingQueue(queue, onSignal))
         case QueueEnd =>
           Metrics.setBoundaryQueueDepth(queue.size())
           Halt()

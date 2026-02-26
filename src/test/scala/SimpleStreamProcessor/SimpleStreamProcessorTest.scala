@@ -8,6 +8,7 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.Await
 import java.util.concurrent.atomic.AtomicInteger
+import scala.jdk.CollectionConverters._
 
 class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
 
@@ -418,6 +419,50 @@ class SimpleStreamProcessorTest extends AnyFunSuite with BeforeAndAfterEach {
     val outcome = Await.result(handle.outcome, 2.seconds)
     assert(outcome == ExecutionCancelled)
     assert(processed.get() < 2000)
+  }
+
+  test("parMap cancellation stops async execution") {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+
+    val node = Source[Int](Stream.fromList((1 to 5000).toList))
+      .parMap(4) { i =>
+        Thread.sleep(2)
+        i
+      }
+
+    val handle = node.runToListAsync(Stream.Empty)
+    Thread.sleep(10)
+    handle.cancel()
+
+    val outcome = Await.result(handle.outcome, 3.seconds)
+    assert(outcome == ExecutionCancelled)
+  }
+
+  test("async boundary producer thread exits after downstream failure") {
+    val before = Thread.getAllStackTraces.keySet().asScala
+      .filter(_.getName.startsWith("simple-stream-async-boundary-"))
+      .map(_.getId)
+      .toSet
+
+    val stream = Source[Int](Stream.fromList((1 to 10000).toList))
+      .withName("boundary-leak-check")
+      .asyncBoundary(1)
+      .map { i =>
+        if (i == 3) throw new RuntimeException("stop")
+        i
+      }
+      .run(Stream.Empty)
+
+    intercept[RuntimeException](stream.toList)
+
+    Thread.sleep(2500)
+
+    val afterAlive = Thread.getAllStackTraces.keySet().asScala
+      .filter(t => t.getName.startsWith("simple-stream-async-boundary-") && t.isAlive)
+      .map(_.getId)
+      .toSet
+
+    assert(afterAlive.diff(before).isEmpty)
   }
 
 }
