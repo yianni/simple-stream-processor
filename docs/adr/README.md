@@ -4,7 +4,13 @@ These ADRs define the baseline contracts for stream semantics and implementation
 
 ## Status
 
-- Accepted: 0001-0007
+- Proposed: 0001-0007
+
+## Engineering Baseline
+
+- Scala: 2.13.x
+- JDK: 17
+- Required validation: deterministic unit tests + concurrency stress tests for boundary/parallel operators
 
 ## Index
 
@@ -15,3 +21,5 @@ These ADRs define the baseline contracts for stream semantics and implementation
 - [0005 Source and Sink Resource Lifecycle](0005-source-and-sink-resource-lifecycle.md)
 - [0006 Windowing Semantics](0006-windowing-semantics.md)
 - [0007 Watermark and Late Event Policy](0007-watermark-and-late-event-policy.md)
+- [Error and Cancellation Matrix](error-and-cancellation-matrix.md)
+- [Event-Time Example](event-time-example.md)
